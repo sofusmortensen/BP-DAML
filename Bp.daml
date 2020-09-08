@@ -1,0 +1,419 @@
+daml 1.2
+module Bp where
+
+import DA.Next.Set as S
+import qualified DA.List as L
+import DA.Assert
+import DA.Optional
+
+data Event = 
+  Service with party : Party; text : Text
+  | Decision with party : Party; description : Text; choices : [(Text, [Event])]
+  | End
+  | Parallel [[Event]]
+  | Race [[Event]]
+  deriving (Eq, Show)
+
+template BusinessProcess_Service
+  with
+    parties : [Party]
+    actor : Party
+    message : Text
+  where
+    signatory parties
+
+
+getParties : [Event] -> Set Party
+getParties [] = empty
+getParties (e::es) =
+  union (getParties es)
+    case e of
+      Service p _ -> S.singleton p
+      Decision p _ chs -> L.foldr union (S.singleton p) (map (getParties . snd) chs)
+      End -> empty
+      Parallel ps -> L.foldr (flip union . getParties) empty ps
+      Race ps -> L.foldr (flip union . getParties) empty ps
+
+getControllers_par : [[Event]] -> Int -> Either [Party] Int
+getControllers_par [] i = Right $ i
+getControllers_par (es::ess) i =
+  getControllers_ es i >>= getControllers_par ess
+
+getControllers_ : [Event] -> Int -> Either [Party] Int
+getControllers_ [] i = Left []
+getControllers_ (e::es) i =
+  case (e, i) of
+    (Service _ _, _) -> getControllers_ es i
+    (Decision p _ _, 0) -> Left [p]
+    (Decision p _ _, i) -> Right $ i - 1
+    (Parallel ps, i) -> getControllers_par ps i
+    (Race ps, i) -> getControllers_par ps i
+    (End, _) -> error "not implemented"
+
+getControllers : [Event] -> Int -> [Party]
+getControllers es i = case getControllers_ es i of
+  Right _ -> []
+  Left ps -> ps
+
+selectProcess_par : [[Event]] -> Text -> Int -> (Int, [[Event]])
+selectProcess_par [] _ i = (i, [])
+selectProcess_par (es::ess) lbl i =
+  let (j, fs) = selectProcess es lbl i
+  in fmap (\x -> fs::x) $ selectProcess_par ess lbl j
+
+selectProcess : [Event] -> Text -> Int -> (Int, [Event])
+selectProcess [] _ i = (i, [])
+selectProcess (e::es) lbl i =
+  case (e, i) of
+    (Service _ _, _) -> selectProcess es lbl i
+    (Decision actor _ cs, 0) ->
+      case find ((lbl ==) . fst) cs of
+        None -> error "label not found"
+        Some es' -> (i - 1, snd es' ++ es)
+    (Decision actor txt cs, i) ->  (i - 1, (Decision actor txt cs)::es)
+    (Parallel ps, i) ->
+      let (i', ps') = selectProcess_par ps lbl i
+      in (i', (Parallel ps')::es)
+    (Race ps, i) ->
+      let (i', ps') = selectProcess_par ps lbl i
+      in (i', (Race ps')::es)
+    (End, _) -> error "not implemented"
+
+generate : BusinessProcess -> [Event] -> Update [Event]
+generate this [] = return []
+generate this (e::es) =
+  case e of
+    End -> return []
+    Service actor message -> do
+      create BusinessProcess_Service with parties = S.toList this.parties; ..
+      generate this es
+    Decision _ _ [] -> generate this es
+    Decision actor txt cs -> return $ (Decision actor txt cs) :: es
+    Parallel ps -> do
+      ps' <- mapA (generate this) ps
+      case L.filter (not . L.null) ps' of
+        [] -> generate this es
+        p::[] -> return $ p ++ es
+        ps'' -> return $ (Parallel ps'') :: es
+    Race ps -> do
+      ps' <- mapA (generate this) ps
+      if elem [] ps'
+        then generate this es
+        else case ps' of
+        [] -> generate this es
+        p::[] -> return $ p ++ es
+        ps'' -> return $ (Race ps'') :: es
+
+selectBody : BusinessProcess -> Text -> Int -> Update (Optional (ContractId BusinessProcess))
+selectBody this txt i = do
+  pr <- generate this this.process
+  r <- generate this $ snd $ selectProcess pr txt i
+  case r of
+    [] -> return None
+    p -> do
+      p' <- generate this p
+      Some <$> create this with process = p'
+
+template BusinessProcess
+  with
+    process : [Event]
+    parties : Set Party
+  where
+    signatory parties
+
+    ensure not $ L.null process &&
+           let p = getParties process in intersection p parties == p
+
+
+    choice Select0 : Optional (ContractId BusinessProcess)
+      with txt : Text
+      controller getControllers process 0
+        do
+          selectBody this txt 0
+
+    choice Select1 : Optional (ContractId BusinessProcess)
+      with txt : Text
+      controller getControllers process 1
+      do
+        selectBody this txt 1
+
+    choice Select2 : Optional (ContractId BusinessProcess)
+      with txt : Text
+      controller getControllers process 2
+      do
+        selectBody this txt 2
+
+    choice Select3 : Optional (ContractId BusinessProcess)
+      with txt : Text
+      controller getControllers process 3
+        do
+          selectBody this txt 3
+
+
+head2 : [a] -> Optional a
+head2 (_::[]) = None
+head2 (h::_) = Some h
+head2 [] = None
+
+onlyOne : [a] -> Optional a
+onlyOne (h::[]) = Some h
+onlyOne _ = None
+
+template BusinessProcess_Issuance
+  with
+    process : [Event]
+    parties : [Party]
+    pendingParties : [Party]
+  where
+    signatory parties
+    observer pendingParties
+
+    choice Sign : ContractId BusinessProcess_Issuance
+      controller head2 pendingParties
+        do
+          create this with parties = (L.head pendingParties) :: parties; pendingParties = L.tail pendingParties
+
+    choice SignAndIssue : ContractId BusinessProcess
+      controller onlyOne pendingParties
+      do
+        create BusinessProcess with parties = S.fromList $ (L.head pendingParties) :: parties; process
+
+data BuilderM e a = BuilderM with state : a; transformation : e -> e
+type Builder = BuilderM [Event] ()
+type ChoiceBuilder = BuilderM [(Text, [Event])] ()
+type ParallelBuilder = BuilderM [[Event]] ()
+
+proc : Builder -> [Event]
+proc (BuilderM _ xs) = xs []
+
+in_parallel : ParallelBuilder -> Builder
+in_parallel (BuilderM _ xs) = BuilderM () $ \l -> (Parallel (xs [])) :: l
+
+race : ParallelBuilder -> Builder
+race (BuilderM _ xs) = BuilderM () $ \l -> (Race (xs [])) :: l
+
+
+line : Builder -> ParallelBuilder
+line (BuilderM _ xs) = BuilderM () $ \x -> (xs []) :: x
+
+service : Party -> Text -> Builder
+service p t = BuilderM () $ (Service p t ::)
+
+select : Party -> Text -> ChoiceBuilder -> Builder
+select p txt (BuilderM _ xs) = BuilderM () $ \l -> (Decision p txt $ xs []) :: l
+
+nop = BuilderM () identity
+
+ch : Text -> Builder -> ChoiceBuilder
+ch txt (BuilderM _ xs) = BuilderM () $ \x -> (txt, xs []) :: x
+
+cancel : Builder
+cancel = BuilderM () (End ::)
+
+instance Functor (BuilderM e) where
+  fmap f (BuilderM a xs) = BuilderM (f a) xs
+
+instance Applicative (BuilderM e) where
+  pure a = BuilderM a identity
+  (BuilderM f xs) <*> (BuilderM y ys) = BuilderM (f y) $ xs . ys
+
+instance Action (BuilderM e) where
+  BuilderM a xs >>= f = case f a of
+    BuilderM b ys -> BuilderM b (xs . ys)
+
+issueProcess_ : ContractId BusinessProcess_Issuance -> [Party] ->  Scenario (ContractId BusinessProcess)
+issueProcess_ cid (p::[]) = p `submit` exercise cid SignAndIssue
+issueProcess_ cid (p::ps) = do
+  cid' <- p `submit` exercise cid Sign
+  issueProcess_ cid' ps
+issueProcess_ _ [] = error ""
+
+issueProcess : Builder -> Scenario (ContractId BusinessProcess)
+issueProcess (BuilderM _ bld) =
+  let process = bld []
+      ps = S.toList $ getParties process
+  in do
+    cid <- (L.head ps) `submit` create BusinessProcess_Issuance with parties = [L.head ps]; process; pendingParties = L.tail ps
+    issueProcess_ cid (L.tail ps)
+
+
+mybp = scenario do
+  acme <- getParty "acme"
+  highStreetBank <- getParty "high street bank"
+  rr <- getParty "road runner"
+  wc <- getParty "wildey coyote"
+
+  let pp = do
+        service acme "ini A"
+        select acme "proceed?" do
+          ch "accept" $ service acme "ok B"
+          ch "reject" do service acme "reject C"; cancel
+
+        in_parallel do
+          line do
+            select acme "proceed?" do
+              ch "accept" do
+                service acme "ok D"
+              ch "reject" do
+                service highStreetBank "ok D"
+                cancel
+
+          line do
+            select highStreetBank "proceed?" do
+              ch "accept" do
+                service highStreetBank "accept E"
+
+          line do
+            select rr "proceed?" do
+              ch "accept" do
+                service rr "meek meek"
+
+        race do
+          line do
+            select acme "proceed?" do
+              ch "accept" $ service acme "acme"
+          line do
+            select rr "proceed?" do
+              ch "accept" $ service acme "rr"
+
+        service wc "all done F"
+
+  cid <- issueProcess pp
+
+  cid <- acme `submit`
+    exercise cid $ Select0 "accept"
+
+  cid <- highStreetBank `submit`
+    exercise (fromSome cid) $ Select1 "accept"
+
+  cid <- acme `submit`
+    exercise (fromSome cid) $ Select0 "accept"
+
+  cid <- rr `submit`
+    exercise (fromSome cid) $ Select0 "accept"
+
+  cid <- rr `submit`
+    exercise (fromSome cid) $ Select1 "accept"
+
+  assert True
+
+
+mybp1 = scenario do
+  acme <- getParty "acme"
+  highStreetBank <- getParty "high street bank"
+
+  let pp = proc do
+        in_parallel do
+          line do
+            select acme "proceed?" do
+              ch "accept" do
+                service acme "ok D"
+
+          line do
+            select highStreetBank "proceed?" do
+              ch "accept" do
+                service highStreetBank "accept E"
+
+        service acme "all done F"
+
+  [acme] === getControllers pp 0
+  [highStreetBank] === getControllers pp 1
+
+  assert True
+
+mybp2 = scenario do
+  acme <- getParty "acme"
+  highStreetBank <- getParty "high street bank"
+
+  let pp = proc do
+        select acme "proceed?" do
+          ch "accept" do
+            service acme "ok D"
+
+        service acme "all done F"
+
+  [acme] === getControllers pp 0
+  [] === getControllers pp 1
+
+  assert True
+
+mybp3 = scenario do
+  acme <- getParty "acme"
+  highStreetBank <- getParty "high street bank"
+  roadrunner <- getParty "roadrunner"
+
+  let pp = proc do
+      in_parallel do
+        line $ in_parallel do
+          line do
+            select acme "proceed?" do
+              ch "accept" do
+                service acme "ok D"
+
+          line do
+            select highStreetBank "proceed?" do
+              ch "accept" do
+                service highStreetBank "accept E"
+
+        line do
+          select roadrunner "proceed?" do
+            ch "accept" do
+              service highStreetBank "accept F"
+
+      service acme "all done G"
+
+  debug pp
+
+
+  [acme] === getControllers pp 0
+  [highStreetBank] === getControllers pp 1
+  [roadrunner] === getControllers pp 2
+
+  assert True
+
+
+ack party description = do
+  service party description
+  select party "proceed?" do
+    ch "ack" nop
+
+commercialFinancing = scenario do
+
+  sales <- getParty "sales"
+  risk <- getParty "risk"
+  admin <- getParty "administration"
+  credit <- getParty "credit"
+
+  cid <- issueProcess do
+
+    ack sales "Consolidate and Digitize Data"
+    ack sales "Analyze Financial Data"
+    select sales "Qualified Request?" do
+      ch "Yes" do
+        ack credit "Verify Credit Record with Credit Offices"
+        ack risk "Sign-off from Risk"
+        ack admin "Prepare Detailed Analysis of Financial Data"
+        ack sales "Prepare Detailed Analysis"
+        select sales "Qualified Request?" do
+          ch "Yes" do
+            ack sales "Elaborate Commercial Financing Reporting"
+          ch "No" do
+            ack sales "Prepare and Transmit Refusal Letter"
+            cancel
+      ch "No" do
+        ack sales "Prepare and Transmit Refusal Letter"
+        cancel
+
+    service sales "done!"
+
+  Some cid <- sales `submit` exercise cid $ Select0 "ack"
+  Some cid <- sales `submit` exercise cid $ Select0 "ack"
+  Some cid <- sales `submit` exercise cid $ Select0 "Yes"
+  Some cid <- credit `submit` exercise cid $ Select0 "ack"
+  Some cid <- risk `submit` exercise cid $ Select0 "ack"
+  Some cid <- admin `submit` exercise cid $ Select0 "ack"
+  Some cid <- sales `submit` exercise cid $ Select0 "ack"
+  Some cid <- sales `submit` exercise cid $ Select0 "Yes"
+  _        <- sales `submit` exercise cid $ Select0 "ack"
+
+  assert True
