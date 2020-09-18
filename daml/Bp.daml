@@ -1,10 +1,10 @@
-daml 1.2
 module Bp where
 
 import DA.Next.Set as S
 import qualified DA.List as L
 import DA.Assert
 import DA.Optional
+import Daml.Script
 
 data Event = 
   Service with party : Party; text : Text
@@ -221,27 +221,27 @@ instance Action (BuilderM e) where
   BuilderM a xs >>= f = case f a of
     BuilderM b ys -> BuilderM b (xs . ys)
 
-issueProcess_ : ContractId BusinessProcess_Issuance -> [Party] ->  Scenario (ContractId BusinessProcess)
-issueProcess_ cid (p::[]) = p `submit` exercise cid SignAndIssue
+issueProcess_ : ContractId BusinessProcess_Issuance -> [Party] ->  Script (ContractId BusinessProcess)
+issueProcess_ cid (p::[]) = p `submit` exerciseCmd cid SignAndIssue
 issueProcess_ cid (p::ps) = do
-  cid' <- p `submit` exercise cid Sign
+  cid' <- p `submit` exerciseCmd cid Sign
   issueProcess_ cid' ps
 issueProcess_ _ [] = error ""
 
-issueProcess : Builder -> Scenario (ContractId BusinessProcess)
+issueProcess : Builder -> Script (ContractId BusinessProcess)
 issueProcess (BuilderM _ bld) =
   let process = bld []
       ps = S.toList $ getParties process
   in do
-    cid <- (L.head ps) `submit` create BusinessProcess_Issuance with parties = [L.head ps]; process; pendingParties = L.tail ps
+    cid <- (L.head ps) `submit` createCmd BusinessProcess_Issuance with parties = [L.head ps]; process; pendingParties = L.tail ps
     issueProcess_ cid (L.tail ps)
 
 
-mybp = scenario do
-  acme <- getParty "acme"
-  highStreetBank <- getParty "high street bank"
-  rr <- getParty "road runner"
-  wc <- getParty "wildey coyote"
+mybp = script do
+  acme <- allocateParty "acme"
+  highStreetBank <- allocateParty "high street bank"
+  rr <- allocateParty "road runner"
+  wc <- allocateParty "wildey coyote"
 
   let pp = do
         service acme "ini A"
@@ -281,26 +281,26 @@ mybp = scenario do
   cid <- issueProcess pp
 
   cid <- acme `submit`
-    exercise cid $ Select0 "accept"
+    exerciseCmd cid $ Select0 "accept"
 
   cid <- highStreetBank `submit`
-    exercise (fromSome cid) $ Select1 "accept"
+    exerciseCmd (fromSome cid) $ Select1 "accept"
 
   cid <- acme `submit`
-    exercise (fromSome cid) $ Select0 "accept"
+    exerciseCmd (fromSome cid) $ Select0 "accept"
 
   cid <- rr `submit`
-    exercise (fromSome cid) $ Select0 "accept"
+    exerciseCmd (fromSome cid) $ Select0 "accept"
 
   cid <- rr `submit`
-    exercise (fromSome cid) $ Select1 "accept"
+    exerciseCmd (fromSome cid) $ Select1 "accept"
 
   assert True
 
 
-mybp1 = scenario do
-  acme <- getParty "acme"
-  highStreetBank <- getParty "high street bank"
+mybp1 = script do
+  acme <- allocateParty "acme"
+  highStreetBank <- allocateParty "high street bank"
 
   let pp = proc do
         in_parallel do
@@ -321,9 +321,9 @@ mybp1 = scenario do
 
   assert True
 
-mybp2 = scenario do
-  acme <- getParty "acme"
-  highStreetBank <- getParty "high street bank"
+mybp2 = script do
+  acme <- allocateParty "acme"
+  highStreetBank <- allocateParty "high street bank"
 
   let pp = proc do
         select acme "proceed?" do
@@ -335,12 +335,10 @@ mybp2 = scenario do
   [acme] === getControllers pp 0
   [] === getControllers pp 1
 
-  assert True
-
-mybp3 = scenario do
-  acme <- getParty "acme"
-  highStreetBank <- getParty "high street bank"
-  roadrunner <- getParty "roadrunner"
+mybp3 = script do
+  acme <- allocateParty "acme"
+  highStreetBank <- allocateParty "high street bank"
+  roadrunner <- allocateParty "roadrunner"
 
   let pp = proc do
       in_parallel do
@@ -364,25 +362,21 @@ mybp3 = scenario do
 
   debug pp
 
-
   [acme] === getControllers pp 0
   [highStreetBank] === getControllers pp 1
   [roadrunner] === getControllers pp 2
-
-  assert True
-
 
 ack party description = do
   service party description
   select party "proceed?" do
     ch "ack" nop
 
-commercialFinancing = scenario do
+commercialFinancing = script do
 
-  sales <- getParty "sales"
-  risk <- getParty "risk"
-  admin <- getParty "administration"
-  credit <- getParty "credit"
+  sales <- allocateParty "sales"
+  risk <- allocateParty "risk"
+  admin <- allocateParty "administration"
+  credit <- allocateParty "credit"
 
   cid <- issueProcess do
 
@@ -406,14 +400,14 @@ commercialFinancing = scenario do
 
     service sales "done!"
 
-  Some cid <- sales `submit` exercise cid $ Select0 "ack"
-  Some cid <- sales `submit` exercise cid $ Select0 "ack"
-  Some cid <- sales `submit` exercise cid $ Select0 "Yes"
-  Some cid <- credit `submit` exercise cid $ Select0 "ack"
-  Some cid <- risk `submit` exercise cid $ Select0 "ack"
-  Some cid <- admin `submit` exercise cid $ Select0 "ack"
-  Some cid <- sales `submit` exercise cid $ Select0 "ack"
-  Some cid <- sales `submit` exercise cid $ Select0 "Yes"
-  _        <- sales `submit` exercise cid $ Select0 "ack"
+  Some cid <- sales `submit` exerciseCmd cid $ Select0 "ack"
+  Some cid <- sales `submit` exerciseCmd cid $ Select0 "ack"
+  Some cid <- sales `submit` exerciseCmd cid $ Select0 "Yes"
+  Some cid <- credit `submit` exerciseCmd cid $ Select0 "ack"
+  Some cid <- risk `submit` exerciseCmd cid $ Select0 "ack"
+  Some cid <- admin `submit` exerciseCmd cid $ Select0 "ack"
+  Some cid <- sales `submit` exerciseCmd cid $ Select0 "ack"
+  Some cid <- sales `submit` exerciseCmd cid $ Select0 "Yes"
+  _        <- sales `submit` exerciseCmd cid $ Select0 "ack"
 
-  assert True
+  pure ()
