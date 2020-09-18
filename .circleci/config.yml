@@ -1,12 +1,9 @@
-version: 2
+version: 2.1
 jobs:
   build:
     docker:
       - image: digitalasset/daml-sdk:1.5.0
-
     steps:
       - checkout
-
-      - run:
-          name: DAML Test
-          command: daml test
+      - run: daml build
+      - run: daml test
