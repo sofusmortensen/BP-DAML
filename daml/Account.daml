@@ -1,0 +1,168 @@
+module Account where
+
+import Daml.Script
+import Effect
+import Util
+
+template Account
+  with
+    issuer : Party
+    accountNo : Text
+    asset : Text
+    owner : Party
+    amount : Decimal
+  where
+    signatory issuer, owner
+
+    key (issuer, accountNo) : (Party, Text)
+    maintainer key._1
+
+template AccountIssuance
+  with
+    account : Account
+  where
+    signatory account.issuer
+    observer account.owner
+
+    key (account.issuer, account.accountNo) : (Party, Text)
+    maintainer key._1
+
+    choice AccountIssuance_Accept : ContractId Account
+      controller account.owner
+      do
+        create account
+
+    choice AccountIssuance_Reject : ()
+      controller account.owner
+      do
+        return ()
+
+    choice AccountIssuance_Withdraw : ()
+      controller account.issuer
+      do
+        return ()
+
+template TransferAgreement
+  with
+    service : Service
+    party : Party
+    account : Text
+  where
+    signatory service.issuer, party
+
+    nonconsuming choice SettlePayer : Optional (ContractId Transfer)
+      with transferId : ContractId Transfer
+           actor : Party
+      controller actor
+      do
+        tr <- fetch transferId
+
+        assert $ tr.service == service 
+        assert $ tr.payer /= service.issuer
+
+        (cid, acc) <- fetchByKey @Account (service.issuer, account)
+        assert $ acc.asset == tr.asset
+        archive cid
+        create acc with amount = acc.amount - tr.amount
+
+        if tr.payee == service.issuer then
+          do
+            archive transferId
+            return None
+        else
+          do
+            (transferId, transferId2) <- exercise transferId Split
+            archive transferId2
+            return $ Some transferId
+
+    nonconsuming choice SettlePayee : Optional (ContractId Transfer)
+      with transferId : ContractId Transfer
+           actor : Party
+      controller actor
+      do
+        tr <- fetch transferId
+
+        assert $ tr.service == service 
+        assert $ tr.payee /= service.issuer
+
+        (cid, acc) <- fetchByKey @Account (service.issuer, account)
+        assert $ acc.asset == tr.asset
+        archive cid
+        create acc with amount = acc.amount + tr.amount
+
+        if tr.payer == service.issuer then
+          do
+            archive transferId
+            return None
+        else
+          do
+            (transferId, transferId2) <- exercise transferId Split
+            archive transferId2
+            return $ Some transferId            
+
+template TransferAgreementProposal
+  with
+    contract : TransferAgreement
+  where
+    signatory contract.service.issuer
+    observer contract.party
+
+    choice TransferAgreementProposal_Sign
+        : ContractId TransferAgreement
+      controller contract.party
+      do
+        create contract
+
+test = script do
+  bank <- allocateParty "bank"
+  alice <- allocateParty "alice"
+  bob <- allocateParty "bob"
+
+  let accountAlice = Account with
+        issuer = bank
+        owner = alice
+        asset = "EUR"
+        accountNo = "00001"
+        amount = 10000.0
+
+  let accountBob = accountAlice with owner = bob; accountNo = "00002"; amount = 0.0
+
+  _create bank $ AccountIssuance accountAlice
+  _create bank $ AccountIssuance accountBob
+
+  submit alice do
+    exerciseByKeyCmd @AccountIssuance (bank, accountAlice.accountNo) AccountIssuance_Accept
+
+  submit bob do
+    exerciseByKeyCmd @AccountIssuance (bank, accountBob.accountNo) AccountIssuance_Accept
+
+  let aggAlice = TransferAgreement with
+                  service = Service bank ""
+                  party = alice
+                  account = "00001"
+
+  let aggBob = TransferAgreement with
+                  service = Service bank ""
+                  party = bob
+                  account = "00002"
+
+  cid <- _create bank $ TransferAgreementProposal aggAlice
+  aliceAggId <- _exercise alice cid TransferAgreementProposal_Sign
+  
+  cid <- _create bank $ TransferAgreementProposal aggBob
+  bobAggId <- _exercise bob cid TransferAgreementProposal_Sign
+
+  let transfer = Transfer with 
+                    service = Service with issuer = bank; id = ""
+                    payer = alice
+                    payee = bob
+                    asset = "EUR"
+                    amount = 150.0
+
+  cid <- _create alice TransferProposal with transfer
+  tid <- _exercise bob cid TransferProposal_Accept
+
+  Some tid <- _exercise' alice aliceAggId (SettlePayer tid)
+  None <- _exercise' bob bobAggId (SettlePayee tid)
+
+  pure ()

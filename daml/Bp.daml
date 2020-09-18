@@ -5,6 +5,7 @@ import qualified DA.List as L
 import DA.Assert
 import DA.Optional
 import Daml.Script
+import Util
 
 data Event = 
   Service with party : Party; text : Text
@@ -222,9 +223,9 @@ instance Action (BuilderM e) where
     BuilderM b ys -> BuilderM b (xs . ys)
 
 issueProcess_ : ContractId BusinessProcess_Issuance -> [Party] ->  Script (ContractId BusinessProcess)
-issueProcess_ cid (p::[]) = p `submit` exerciseCmd cid SignAndIssue
+issueProcess_ cid (p::[]) = _exercise p cid SignAndIssue
 issueProcess_ cid (p::ps) = do
-  cid' <- p `submit` exerciseCmd cid Sign
+  cid' <- _exercise p cid Sign
   issueProcess_ cid' ps
 issueProcess_ _ [] = error ""
 
@@ -233,7 +234,7 @@ issueProcess (BuilderM _ bld) =
   let process = bld []
       ps = S.toList $ getParties process
   in do
-    cid <- (L.head ps) `submit` createCmd BusinessProcess_Issuance with parties = [L.head ps]; process; pendingParties = L.tail ps
+    cid <- _create (L.head ps) BusinessProcess_Issuance with parties = [L.head ps]; process; pendingParties = L.tail ps
     issueProcess_ cid (L.tail ps)
 
 
@@ -280,20 +281,15 @@ mybp = script do
 
   cid <- issueProcess pp
 
-  cid <- acme `submit`
-    exerciseCmd cid $ Select0 "accept"
+  cid <- _exercise acme cid $ Select0 "accept"
 
-  cid <- highStreetBank `submit`
-    exerciseCmd (fromSome cid) $ Select1 "accept"
+  cid <- _exercise highStreetBank (fromSome cid) $ Select1 "accept"
 
-  cid <- acme `submit`
-    exerciseCmd (fromSome cid) $ Select0 "accept"
+  cid <- _exercise acme (fromSome cid) $ Select0 "accept"
 
-  cid <- rr `submit`
-    exerciseCmd (fromSome cid) $ Select0 "accept"
+  cid <- _exercise rr (fromSome cid) $ Select0 "accept"
 
-  cid <- rr `submit`
-    exerciseCmd (fromSome cid) $ Select1 "accept"
+  cid <- _exercise rr (fromSome cid) $ Select1 "accept"
 
   assert True
 
@@ -400,14 +396,14 @@ commercialFinancing = script do
 
     service sales "done!"
 
-  Some cid <- sales `submit` exerciseCmd cid $ Select0 "ack"
-  Some cid <- sales `submit` exerciseCmd cid $ Select0 "ack"
-  Some cid <- sales `submit` exerciseCmd cid $ Select0 "Yes"
-  Some cid <- credit `submit` exerciseCmd cid $ Select0 "ack"
-  Some cid <- risk `submit` exerciseCmd cid $ Select0 "ack"
-  Some cid <- admin `submit` exerciseCmd cid $ Select0 "ack"
-  Some cid <- sales `submit` exerciseCmd cid $ Select0 "ack"
-  Some cid <- sales `submit` exerciseCmd cid $ Select0 "Yes"
-  _        <- sales `submit` exerciseCmd cid $ Select0 "ack"
+  Some cid <- _exercise sales  cid $ Select0 "ack"
+  Some cid <- _exercise sales  cid $ Select0 "ack"
+  Some cid <- _exercise sales  cid $ Select0 "Yes"
+  Some cid <- _exercise credit cid $ Select0 "ack"
+  Some cid <- _exercise risk   cid $ Select0 "ack"
+  Some cid <- _exercise admin  cid $ Select0 "ack"
+  Some cid <- _exercise sales  cid $ Select0 "ack"
+  Some cid <- _exercise sales  cid $ Select0 "Yes"
+  _        <- _exercise sales  cid $ Select0 "ack"
 
   pure ()

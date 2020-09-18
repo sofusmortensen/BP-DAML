@@ -1,0 +1,38 @@
+module Effect where
+
+data Service = 
+  Service with issuer : Party; id : Text
+  deriving (Eq, Show)
+
+template Transfer
+  with
+    service : Service
+    payer : Party
+    payee : Party
+    asset : Text
+    amount : Decimal
+  where
+    signatory payer, payee
+    observer service.issuer
+
+    ensure payer /= payee
+
+    choice Split : (ContractId Transfer, ContractId Transfer)
+      controller service.issuer
+      do
+        l <- create this with payer = service.issuer
+        r <- create this with payee = service.issuer
+        return (l, r)
+
+template TransferProposal
+  with
+    transfer : Transfer
+  where
+    signatory transfer.payer
+    observer transfer.payee
+
+    choice TransferProposal_Accept : ContractId Transfer
+      controller transfer.payee
+      do
+        create transfer
+    
