@@ -3,9 +3,9 @@ module Bp where
 import DA.Next.Set as S
 import qualified DA.List as L
 import DA.Assert
-import DA.Optional
 import Daml.Script
 import Util
+import DA.Optional
 
 data Event = 
   Service with party : Party; text : Text
@@ -105,15 +105,15 @@ generate this (e::es) =
         p::[] -> return $ p ++ es
         ps'' -> return $ (Race ps'') :: es
 
-selectBody : BusinessProcess -> Text -> Int -> Update (Optional (ContractId BusinessProcess))
-selectBody this txt i = do
+selectBody : BusinessProcess -> [Party] -> Text -> Int -> Update (Optional (ContractId BusinessProcess))
+selectBody this ctrl txt i = do
   pr <- generate this this.process
   r <- generate this $ snd $ selectProcess pr txt i
   case r of
     [] -> return None
     p -> do
       p' <- generate this p
-      Some <$> create this with process = p'
+      Some <$> create this with process = p'; parties = S.union (S.fromList ctrl) this.parties
 
 template BusinessProcess
   with
@@ -121,34 +121,34 @@ template BusinessProcess
     parties : Set Party
   where
     signatory parties
+    observer L.foldl1 (++) (map (getControllers process) [0..3])
 
     ensure not $ L.null process &&
            let p = getParties process in intersection p parties == p
-
 
     choice Select0 : Optional (ContractId BusinessProcess)
       with txt : Text
       controller getControllers process 0
         do
-          selectBody this txt 0
+          selectBody this (getControllers process 0) txt 0
 
     choice Select1 : Optional (ContractId BusinessProcess)
       with txt : Text
       controller getControllers process 1
       do
-        selectBody this txt 1
+        selectBody this (getControllers process 1) txt 1
 
     choice Select2 : Optional (ContractId BusinessProcess)
       with txt : Text
       controller getControllers process 2
       do
-        selectBody this txt 2
+        selectBody this (getControllers process 2) txt 2
 
     choice Select3 : Optional (ContractId BusinessProcess)
       with txt : Text
       controller getControllers process 3
         do
-          selectBody this txt 3
+          selectBody this (getControllers process 3) txt 3
 
 
 head2 : [a] -> Optional a
@@ -159,25 +159,6 @@ head2 [] = None
 onlyOne : [a] -> Optional a
 onlyOne (h::[]) = Some h
 onlyOne _ = None
-
-template BusinessProcess_Issuance
-  with
-    process : [Event]
-    parties : [Party]
-    pendingParties : [Party]
-  where
-    signatory parties
-    observer pendingParties
-
-    choice Sign : ContractId BusinessProcess_Issuance
-      controller head2 pendingParties
-        do
-          create this with parties = (L.head pendingParties) :: parties; pendingParties = L.tail pendingParties
-
-    choice SignAndIssue : ContractId BusinessProcess
-      controller onlyOne pendingParties
-      do
-        create BusinessProcess with parties = S.fromList $ (L.head pendingParties) :: parties; process
 
 data BuilderM e a = BuilderM with state : a; transformation : e -> e
 type Builder = BuilderM [Event] ()
@@ -222,21 +203,12 @@ instance Action (BuilderM e) where
   BuilderM a xs >>= f = case f a of
     BuilderM b ys -> BuilderM b (xs . ys)
 
-issueProcess_ : ContractId BusinessProcess_Issuance -> [Party] ->  Script (ContractId BusinessProcess)
-issueProcess_ cid (p::[]) = _exercise p cid SignAndIssue
-issueProcess_ cid (p::ps) = do
-  cid' <- _exercise p cid Sign
-  issueProcess_ cid' ps
-issueProcess_ _ [] = error ""
-
-issueProcess : Builder -> Script (ContractId BusinessProcess)
-issueProcess (BuilderM _ bld) =
+issueProcess : Party -> Builder -> Script (ContractId BusinessProcess)
+issueProcess issuer (BuilderM _ bld) =
   let process = bld []
       ps = S.toList $ getParties process
   in do
-    cid <- _create (L.head ps) BusinessProcess_Issuance with parties = [L.head ps]; process; pendingParties = L.tail ps
-    issueProcess_ cid (L.tail ps)
-
+    _create issuer BusinessProcess with parties = S.singleton issuer; process
 
 mybp = script do
   acme <- allocateParty "acme"
@@ -279,7 +251,7 @@ mybp = script do
 
         service wc "all done F"
 
-  cid <- issueProcess pp
+  cid <- issueProcess acme pp
 
   cid <- _exercise acme cid $ Select0 "accept"
 
@@ -363,7 +335,7 @@ mybp3 = script do
   [roadrunner] === getControllers pp 2
 
 ack party description = do
-  service party description
+  service party ("Request: " <> description)
   select party "proceed?" do
     ch "ack" nop
 
@@ -374,7 +346,7 @@ commercialFinancing = script do
   admin <- allocateParty "administration"
   credit <- allocateParty "credit"
 
-  cid <- issueProcess do
+  cid <- issueProcess sales do
 
     ack sales "Consolidate and Digitize Data"
     ack sales "Analyze Financial Data"
@@ -394,7 +366,7 @@ commercialFinancing = script do
         ack sales "Prepare and Transmit Refusal Letter"
         cancel
 
-    service sales "done!"
+    service sales "Complete"
 
   Some cid <- _exercise sales  cid $ Select0 "ack"
   Some cid <- _exercise sales  cid $ Select0 "ack"
