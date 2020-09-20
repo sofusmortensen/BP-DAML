@@ -1,8 +1,18 @@
 module Effect where
 
+import DA.Next.Set
+
 data Service = 
   Service with issuer : Party; id : Text
   deriving (Eq, Show)
+
+template Effect
+  with
+    issuer : Set Party
+    message : Text
+    actor : Party
+  where
+    signatory issuer
 
 template Transfer
   with

@@ -14,3 +14,7 @@ _create p c = submit p $ createCmd c
 _if : Bool -> a -> Optional a
 _if True = Some
 _if False = const None
+
+instance Functor ((,,) a b) where
+  fmap f (x, y, z) = (x, y, f z)
+  v <$ (x, y, _) = (x, y, v)

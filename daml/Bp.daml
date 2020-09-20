@@ -6,23 +6,18 @@ import DA.Assert
 import Daml.Script
 import Util
 import DA.Optional
+import Effect qualified as E
+import DA.List
+import DA.Tuple
 
-data Event = 
-  Service with party : Party; text : Text
-  | Decision with party : Party; description : Text; choices : [(Text, [Event])]
+data Event 
+  = Service with party : Party; text : Text
+  | Transfer with tr: E.Transfer
+  | Decision with party : Party; description : Text; choices : [(Text, Bool, [Event])]
   | End
   | Parallel [[Event]]
   | Race [[Event]]
   deriving (Eq, Show)
-
-template BusinessProcess_Service
-  with
-    parties : [Party]
-    actor : Party
-    message : Text
-  where
-    signatory parties
-
 
 getParties : [Event] -> Set Party
 getParties [] = empty
@@ -30,10 +25,11 @@ getParties (e::es) =
   union (getParties es)
     case e of
       Service p _ -> S.singleton p
-      Decision p _ chs -> L.foldr union (S.singleton p) (map (getParties . snd) chs)
+      Decision p _ chs -> L.foldr union (S.singleton p) (map (getParties . thd3) chs)
       End -> empty
       Parallel ps -> L.foldr (flip union . getParties) empty ps
       Race ps -> L.foldr (flip union . getParties) empty ps
+      Transfer _ -> empty
 
 getControllers_par : [[Event]] -> Int -> Either [Party] Int
 getControllers_par [] i = Right $ i
@@ -50,35 +46,48 @@ getControllers_ (e::es) i =
     (Parallel ps, i) -> getControllers_par ps i
     (Race ps, i) -> getControllers_par ps i
     (End, _) -> error "not implemented"
+    (Transfer _, _) -> getControllers_ es i
 
 getControllers : [Event] -> Int -> [Party]
 getControllers es i = case getControllers_ es i of
   Right _ -> []
   Left ps -> ps
 
-selectProcess_par : [[Event]] -> Text -> Int -> (Int, [[Event]])
-selectProcess_par [] _ i = (i, [])
+getControllers' : [Event] -> [(Text, Party)]
+getControllers' [] = []
+getControllers' (e::es) =
+  case e of
+    Service _ _ -> getControllers' es
+    Decision p desc _ -> [(desc, p)]
+    Parallel ps -> foldr1 (++) $ fmap getControllers' ps
+    Race ps -> foldr1 (++) $ fmap getControllers' ps
+    End -> error "not implemented"
+    Transfer _ -> getControllers' es
+
+selectProcess_par : [[Event]] -> Text -> Int -> (Int, Bool, [[Event]])
+selectProcess_par [] _ i = (i, False, [])
 selectProcess_par (es::ess) lbl i =
-  let (j, fs) = selectProcess es lbl i
+  let (j, sign, fs) = selectProcess es lbl i
   in fmap (\x -> fs::x) $ selectProcess_par ess lbl j
 
-selectProcess : [Event] -> Text -> Int -> (Int, [Event])
-selectProcess [] _ i = (i, [])
+selectProcess : [Event] -> Text -> Int -> (Int, Bool, [Event])
+selectProcess [] _ i = (i, False, [])
 selectProcess (e::es) lbl i =
   case (e, i) of
     (Service _ _, _) -> selectProcess es lbl i
     (Decision actor _ cs, 0) ->
-      case find ((lbl ==) . fst) cs of
+      case find ((lbl ==) . fst3) cs of
         None -> error "label not found"
-        Some es' -> (i - 1, snd es' ++ es)
-    (Decision actor txt cs, i) ->  (i - 1, (Decision actor txt cs)::es)
+        Some es' -> (i - 1, snd3 es', thd3 es' ++ es)
+    (Decision actor txt cs, i) ->  (i - 1, False, (Decision actor txt cs)::es)
     (Parallel ps, i) ->
-      let (i', ps') = selectProcess_par ps lbl i
-      in (i', (Parallel ps')::es)
+      let (i', sign, ps') = selectProcess_par ps lbl i
+      in (i', sign, (Parallel ps')::es)
     (Race ps, i) ->
-      let (i', ps') = selectProcess_par ps lbl i
-      in (i', (Race ps')::es)
+      let (i', sign, ps') = selectProcess_par ps lbl i
+      in (i', sign, (Race ps')::es)
     (End, _) -> error "not implemented"
+    (Transfer _, _) -> selectProcess es lbl i
 
 generate : BusinessProcess -> [Event] -> Update [Event]
 generate this [] = return []
@@ -86,8 +95,17 @@ generate this (e::es) =
   case e of
     End -> return []
     Service actor message -> do
-      create BusinessProcess_Service with parties = S.toList this.parties; ..
+      create E.Effect with issuer = this.parties; ..
       generate this es
+    Transfer tr -> do
+        if not $ member tr.payer this.parties then 
+          return [Decision tr.payer "Authorize transfer" [("Sign", True, (Transfer tr)::es)]]
+        else if not $ member tr.payee this.parties then 
+          return [Decision tr.payee "Authorize transfer" [("Sign", True, (Transfer tr)::es)]]
+        else
+          do
+            create tr
+            generate this es
     Decision _ _ [] -> generate this es
     Decision actor txt cs -> return $ (Decision actor txt cs) :: es
     Parallel ps -> do
@@ -106,50 +124,46 @@ generate this (e::es) =
         ps'' -> return $ (Race ps'') :: es
 
 selectBody : BusinessProcess -> [Party] -> Text -> Int -> Update (Optional (ContractId BusinessProcess))
-selectBody this ctrl txt i = do
+selectBody this actor txt i = do
+  let parties' = S.union (S.fromList actor) this.parties
   pr <- generate this this.process
-  r <- generate this $ snd $ selectProcess pr txt i
+  let (_, sign, es) = selectProcess pr txt i --- sofus todo
+  r <- generate (this with parties = parties') es
   case r of
     [] -> return None
     p -> do
       p' <- generate this p
-      Some <$> create this with process = p'; parties = S.union (S.fromList ctrl) this.parties
+      if sign then
+        Some <$> create this with process = p'; parties = parties'
+      else
+        Some <$> create this with process = p'; observers = S.union (S.fromList actor) this.observers
 
 template BusinessProcess
   with
     process : [Event]
     parties : Set Party
+    observers : Set Party
   where
     signatory parties
-    observer L.foldl1 (++) (map (getControllers process) [0..3])
+    observer observers, snd <$> getControllers' process
 
     ensure not $ L.null process &&
            let p = getParties process in intersection p parties == p
 
-    choice Select0 : Optional (ContractId BusinessProcess)
-      with txt : Text
-      controller getControllers process 0
+    choice Select : Optional (ContractId BusinessProcess)
+      with c : Int
+           txt : Text
+           actor : Party
+      controller actor
         do
-          selectBody this (getControllers process 0) txt 0
+          [actor] === getControllers process c
+          selectBody this [actor] txt c
 
-    choice Select1 : Optional (ContractId BusinessProcess)
-      with txt : Text
-      controller getControllers process 1
+    nonconsuming choice Status : [(Text, Party)]
+      with actor : Party
+      controller actor
       do
-        selectBody this (getControllers process 1) txt 1
-
-    choice Select2 : Optional (ContractId BusinessProcess)
-      with txt : Text
-      controller getControllers process 2
-      do
-        selectBody this (getControllers process 2) txt 2
-
-    choice Select3 : Optional (ContractId BusinessProcess)
-      with txt : Text
-      controller getControllers process 3
-        do
-          selectBody this (getControllers process 3) txt 3
-
+        return $ getControllers' process
 
 head2 : [a] -> Optional a
 head2 (_::[]) = None
@@ -162,7 +176,7 @@ onlyOne _ = None
 
 data BuilderM e a = BuilderM with state : a; transformation : e -> e
 type Builder = BuilderM [Event] ()
-type ChoiceBuilder = BuilderM [(Text, [Event])] ()
+type ChoiceBuilder = BuilderM [(Text, Bool, [Event])] ()
 type ParallelBuilder = BuilderM [[Event]] ()
 
 proc : Builder -> [Event]
@@ -181,13 +195,20 @@ line (BuilderM _ xs) = BuilderM () $ \x -> (xs []) :: x
 service : Party -> Text -> Builder
 service p t = BuilderM () $ (Service p t ::)
 
+transfer : E.Service -> Party -> Party -> Text -> Decimal -> Builder
+transfer svc payer payee ccy amount = BuilderM () $ (Transfer tr ::)
+  where tr = E.Transfer svc payer payee ccy amount
+
 select : Party -> Text -> ChoiceBuilder -> Builder
 select p txt (BuilderM _ xs) = BuilderM () $ \l -> (Decision p txt $ xs []) :: l
 
 nop = BuilderM () identity
 
 ch : Text -> Builder -> ChoiceBuilder
-ch txt (BuilderM _ xs) = BuilderM () $ \x -> (txt, xs []) :: x
+ch txt (BuilderM _ xs) = BuilderM () $ \x -> (txt, True, xs []) :: x
+
+chNosign : Text -> Builder -> ChoiceBuilder
+chNosign txt (BuilderM _ xs) = BuilderM () $ \x -> (txt, False, xs []) :: x
 
 cancel : Builder
 cancel = BuilderM () (End ::)
@@ -208,7 +229,7 @@ issueProcess issuer (BuilderM _ bld) =
   let process = bld []
       ps = S.toList $ getParties process
   in do
-    _create issuer BusinessProcess with parties = S.singleton issuer; process
+    _create issuer BusinessProcess with parties = S.singleton issuer; process; observers = S.empty
 
 mybp = script do
   acme <- allocateParty "acme"
@@ -253,15 +274,15 @@ mybp = script do
 
   cid <- issueProcess acme pp
 
-  cid <- _exercise acme cid $ Select0 "accept"
+  cid <- _exercise' acme cid $ Select 0 "accept"
 
-  cid <- _exercise highStreetBank (fromSome cid) $ Select1 "accept"
+  cid <- _exercise' highStreetBank (fromSome cid) $ Select 1 "accept"
 
-  cid <- _exercise acme (fromSome cid) $ Select0 "accept"
+  cid <- _exercise' acme (fromSome cid) $ Select 0 "accept"
 
-  cid <- _exercise rr (fromSome cid) $ Select0 "accept"
+  cid <- _exercise' rr (fromSome cid) $ Select 0 "accept"
 
-  cid <- _exercise rr (fromSome cid) $ Select1 "accept"
+  cid <- _exercise' rr (fromSome cid) $ Select 1 "accept"
 
   assert True
 
@@ -339,12 +360,21 @@ ack party description = do
   select party "proceed?" do
     ch "ack" nop
 
+ackNosign party description = do
+  service party ("Request: " <> description)
+  select party "proceed?" do
+    chNosign "ack" nop
+
 commercialFinancing = script do
 
   sales <- allocateParty "sales"
-  risk <- allocateParty "risk"
+  treasury <- allocateParty "treasury"
   admin <- allocateParty "administration"
   credit <- allocateParty "credit"
+  cust <- allocateParty "customer"
+  bank <- allocateParty "bank"
+
+  let svc = E.Service bank "cash"
 
   cid <- issueProcess sales do
 
@@ -353,12 +383,20 @@ commercialFinancing = script do
     select sales "Qualified Request?" do
       ch "Yes" do
         ack credit "Verify Credit Record with Credit Offices"
-        ack risk "Sign-off from Risk"
-        ack admin "Prepare Detailed Analysis of Financial Data"
+        ack treasury "Sign-off from Treasury"
+        ackNosign admin "Prepare Detailed Analysis of Financial Data"
         ack sales "Prepare Detailed Analysis"
         select sales "Qualified Request?" do
           ch "Yes" do
             ack sales "Elaborate Commercial Financing Reporting"
+            select cust "Accept?" do
+              ch "No" do
+                ack sales "Prepare and Transmit Refusal Letter"
+                cancel
+              ch "Yes" do
+                transfer svc cust credit "EUR" 10000.0
+                transfer svc admin cust "CHF" 12000.0
+                ack sales "Complete purchase"
           ch "No" do
             ack sales "Prepare and Transmit Refusal Letter"
             cancel
@@ -368,14 +406,28 @@ commercialFinancing = script do
 
     service sales "Complete"
 
-  Some cid <- _exercise sales  cid $ Select0 "ack"
-  Some cid <- _exercise sales  cid $ Select0 "ack"
-  Some cid <- _exercise sales  cid $ Select0 "Yes"
-  Some cid <- _exercise credit cid $ Select0 "ack"
-  Some cid <- _exercise risk   cid $ Select0 "ack"
-  Some cid <- _exercise admin  cid $ Select0 "ack"
-  Some cid <- _exercise sales  cid $ Select0 "ack"
-  Some cid <- _exercise sales  cid $ Select0 "Yes"
-  _        <- _exercise sales  cid $ Select0 "ack"
+  Some cid <- _exercise' sales    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "Yes"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' credit   cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' treasury cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' admin    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "Yes"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' cust     cid $ Select 0 "Yes"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' admin    cid $ Select 0 "Sign"
+  _exercise' sales cid Status >>= debug
+  None     <- _exercise' sales    cid $ Select 0 "ack"
 
   pure ()

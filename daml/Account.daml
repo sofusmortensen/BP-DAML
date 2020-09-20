@@ -114,46 +114,49 @@ template TransferAgreementProposal
         create contract
 
 test = script do
-  bank <- allocateParty "bank"
-  alice <- allocateParty "alice"
-  bob <- allocateParty "bob"
+  [issuer, alice, bob] <- mapA allocateParty ["bank", "alice", "bob"]
+
+  let asset = "EUR"
 
   let accountAlice = Account with
-        issuer = bank
         owner = alice
-        asset = "EUR"
         accountNo = "00001"
         amount = 10000.0
+        ..
 
-  let accountBob = accountAlice with owner = bob; accountNo = "00002"; amount = 0.0
+  let accountBob = Account with
+        owner = bob
+        accountNo = "00002"
+        amount = 0.0
+        ..
 
-  _create bank $ AccountIssuance accountAlice
-  _create bank $ AccountIssuance accountBob
+  _create issuer $ AccountIssuance accountAlice
+  _create issuer $ AccountIssuance accountBob
 
   submit alice do
-    exerciseByKeyCmd @AccountIssuance (bank, accountAlice.accountNo) AccountIssuance_Accept
+    exerciseByKeyCmd @AccountIssuance (issuer, accountAlice.accountNo) AccountIssuance_Accept
 
   submit bob do
-    exerciseByKeyCmd @AccountIssuance (bank, accountBob.accountNo) AccountIssuance_Accept
+    exerciseByKeyCmd @AccountIssuance (issuer, accountBob.accountNo) AccountIssuance_Accept
 
   let aggAlice = TransferAgreement with
-                  service = Service bank ""
+                  service = Service issuer ""
                   party = alice
                   account = "00001"
 
   let aggBob = TransferAgreement with
-                  service = Service bank ""
+                  service = Service issuer ""
                   party = bob
                   account = "00002"
 
-  cid <- _create bank $ TransferAgreementProposal aggAlice
+  cid <- _create issuer $ TransferAgreementProposal aggAlice
   aliceAggId <- _exercise alice cid TransferAgreementProposal_Sign
   
-  cid <- _create bank $ TransferAgreementProposal aggBob
+  cid <- _create issuer $ TransferAgreementProposal aggBob
   bobAggId <- _exercise bob cid TransferAgreementProposal_Sign
 
   let transfer = Transfer with 
-                    service = Service with issuer = bank; id = ""
+                    service = Service with issuer = issuer; id = ""
                     payer = alice
                     payee = bob
                     asset = "EUR"
