@@ -25,17 +25,22 @@ test_1 = script do
           payout forccy nominal
           give $ payout domccy (strike * nominal)
 
-  let ss = let
-             nominal = lit 10000000.0
-             fixedrate = lit 0.012 
-           in rollout (lit $ date 2019 Sep 1) (Years 3) (Months 3) (DaysStart 0) (DaysEnd 2) \p -> do
-             let floatLeg = nominal * fixing "USDLIBOR3M" * p.dcf "act/365"
-             let fixedLeg = nominal * fixedrate * p.dcf "act/act"
-             payout "DKK" floatLeg
-             give $ payout "DKK" fixedLeg
-             kontract do
-               holder_can (before p.end) "cancel" $ void
-               any_can (after p.end) "continue" $ next
+  let ss = 
+        let
+          nominal = lit 10000000.0
+          fixedrate = lit 0.012 
+        in 
+          rollout
+            (lit $ date 2019 Sep 1) (Years 3) (Months 3)
+            (DaysStart 0) (DaysEnd 2)
+          do
+              let floatLeg = nominal * fixing "USDLIBOR3M" * dcf "act/365"
+              let fixedLeg = nominal * fixedrate * dcf "act/act"
+              payout "DKK" floatLeg
+              give $ payout "DKK" fixedLeg
+              kontract do
+                holder_can (before end) "cancel" void
+                when (after end) next
 {-
   let euroCall maturity forccy domccy strike nominal = options do
         given true "exercise" do
@@ -76,13 +81,13 @@ swapExample = script do
                     (Months 3)         -- frequency
                     (DaysStart 0)      -- fixing 
                     (DaysEnd 2)        -- payment
-                    \p -> do
-              let floatLeg = nominal * fixing "USDLIBOR3M" * p.dcf "act/365"
-              let fixedLeg = nominal * fixedrate * p.dcf "act/act"
+            do
+              let floatLeg = nominal * fixing "USDLIBOR3M" * dcf "act/365"
+              let fixedLeg = nominal * fixedrate * dcf "act/act"
               payout "USD" floatLeg
               give $ payout "USD" fixedLeg
               kontract do
-                any_can anytime "continue" $ next
+                when anytime next
   
   let proposal = createAgreement alice bob (Some acme) (Service issuer "cash") swapContract
     
@@ -90,8 +95,8 @@ swapExample = script do
   Right cid <- submit alice $ exerciseCmd prop $ MultiSign_Sign alice
 
 
-  _ <-
-    submit acme $ exerciseCmd cid Publish with name = "USDLIBOR3M"; fixingDate = date 2019 Sep 1; value = 0.15
+ -- not implemented
+ -- _ <- submit acme $ exerciseCmd cid Publish with name = "USDLIBOR3M"; fixingDate = date 2019 Sep 1; value = 0.15
     
   return ()
   

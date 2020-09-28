@@ -27,3 +27,12 @@ instance Functor ((,,) a b) where
   v <$ (x, y, _) = (x, y, v)
 
 undefined = error "not implemented"
+
+infixl 0 `on`
+infixl 1 &
+
+on : (b -> b -> c) -> (a -> b) -> a -> a -> c
+((.*.) `on` f) x y = f x .*. f y
+
+(&) : a -> (a -> b) -> b
+x & f = f x

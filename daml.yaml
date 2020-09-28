@@ -1,10 +1,11 @@
 sdk-version: 1.5.0
 name: kontract
-source: daml
+source: daml  
 parties:
   - Alice
   - Bob
 version: 0.0.2
+dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script

@@ -121,17 +121,17 @@ instance IsObservable a => Multiplicative (Obs a) where
 _not : Obs Bool -> Obs Bool
 _not x = munit - x
 
---start : Obs Time
---start = Obs Start
-
---end : Obs Time
---end = Obs End
-
 dcf_ : Obs Date -> Obs Date -> Text -> Obs Decimal
 dcf_ (Obs s) (Obs e) conv = Obs $ Dcf s e conv
 
---dcf_ : Text -> Obs Decimal
---dcf_ conv = Obs $ Dcf Start End conv
+dcf : Text -> Obs Decimal
+dcf = dcf_ (Obs Start) (Obs End)
+
+start : Obs Time
+start = Obs Start
+
+end : Obs Time
+end = Obs End
 
 instance IsObservable a => Divisible (Obs a) where
   (Obs x) / (Obs y) = Obs $ Div x y
@@ -245,30 +245,6 @@ data State = Void
 --             | LambdaS State
              | App with arg : State; body : State
              deriving (Eq, Show)
-
---- operator principles
---- ~ means contract
---- . means observable
---- $ means not observable
-
---- $*  Decimal -> Contract -> Contract
---- .*  Observable -> Contract -> Contract
-
--- recv c a  = State' ((), Scale (lit a) $ One c)
--- scal a (State' (v, s)) = State' (v, Scale (lit a) s)
-
--- (>.) : Obs a  -> Obs a -> Obs Bool
--- (Obs x) >. (Obs y) = Obs $ LessThan y x
-
---(<.) : Obs a -> Obs a -> Obs Bool
---(Obs x) <. (Obs y) = Obs $ LessThan x y
-
---(<=.) : Obs a -> Obs a -> Obs Bool
---x <=. y = (x <. y) |. (x =. y)
-
---(>=.) : Obs a -> Obs a -> Obs Bool
---x >=. y = (x >. y) |. (x =. y)
-
 
 class ObsCompare a b where
   (>.) : a -> b -> Obs Bool
@@ -472,25 +448,6 @@ reduceState now fixingdate fixings selection sc rev = if sc == 0.0 then const [V
                                   [s] -> Right $ Some t with state = s; prerequisite
                                   xs -> Right $ Some t with prerequisite; state = And xs
 
-{-
-controllers : State -> Actors
-controllers (App {}) = error "App not implemented"
---controllers (LambdaO {}) = error "LambdaO not implemented"
---controllers (LambdaS {}) = error "LambdaS not implemented"
-controllers (Next) = NoActor
-controllers (Scale _ s) = controllers s
-controllers (And l) = foldl union NoActor $ map controllers l
-controllers (Branch m) = foldl union NoActor $ map go $ m
-                            where 
-                              go tr = 
-                                case tr.transitionType of
-                                  TransitionChoice tc -> tc._1
-                                  TransitionWhen -> NoActor
-controllers Void = NoActor
-controllers (One _) = NoActor
-controllers (Give s) = swap $ controllers s
-controllers (Rollout _ _ _ _ _ c) = controllers c
--}
 type Cid = Either KontractId TransferId
 createFromState : Kontract -> State -> Update Cid
 createFromState this (One currency) = 
@@ -513,22 +470,6 @@ template Kontract
     signatory holder, writer
     observer oracle
 
-  {-  controller _if (member Holder $ controllers state) holder can
-      SelectHolder : [Cid] 
-        with name : Text
-        do
-          let ctrl = if member Holder $ controllers state then Holder else error "Unauthorized"
-          now <- getTime
-          mapA (createFromState this) $ reduceState now None M.empty (Some (ctrl, name)) 1.0 False state
-
-    controller _if (member Writer $ controllers state) writer can
-      SelectWriter : [Cid]
-        with name : Text
-        do
-          let ctrl = if member Writer $ controllers state then Writer else error "Unauthorized"
-          now <- getTime
-          mapA (createFromState this) $ reduceState now None M.empty (Some (ctrl, name)) 1.0 False state
--}
     choice Select : [Cid]
       with
         name : Text
@@ -536,27 +477,16 @@ template Kontract
       controller actor
       do
         let ctrl
-              | actor == holder {- && member Holder (controllers state) -} = Holder
-              | actor == writer {- && member Writer (controllers state) -} = Writer
+              | actor == holder = Holder
+              | actor == writer = Writer
               | otherwise = error "Unauthorized"
         now <- getTime
 
-        debug state
-        let s0 = select (ctrl, name) False state
-        assertMsg "no can do" $ s0 /= state
+        let s' = select (ctrl, name) False state
+        assertMsg "no can do" $ s' /= state
 
-        let ss = reduceState' now None M.empty 1.0 False s0
-        debug ss
-        mapA (createFromState this) ss
-{-        debug state
-        debug ss
-
-        let ss' = concatMap (reduceState now None M.empty (Some (ctrl, name)) 1.0 False) ss
-        debug ss'
-        if ss' == ss
-          then error "no such selection possible" 
-          else mapA (createFromState this) ss'
--}
+        let s'' = reduceState' now None M.empty 1.0 False s'
+        mapA (createFromState this) s''
 
     choice Lifecycle : [Cid]
       with
@@ -646,45 +576,19 @@ writer_can : Obs Bool -> Text -> State' a -> Kontract' a
 writer_can prerequisite name (State' (v, state))
   = Kontract' (v, [Transition with transitionType = TransitionChoice (OneActor Writer, name); ..])
 
---anyCan : Text -> Option' a -> Option' a
---anyCan name opt = opt
---              | Pay with currency : Text; amount : Decimal; fromParty : Party; toParty : Party
-
 give (State' (v, s)) = State' (v, Give s) 
 one c = One c
 void = State' ((), Void) 
 
-data RollOutArg = RollOutArg with
-  begin : Obs Time 
-  end : Obs Time
-  dcf : Text -> Obs Decimal
-
-rollout : Obs Date -> Frequency -> Frequency -> Offset -> Offset -> (RollOutArg -> State' a) -> State' ()
+rollout : Obs Date -> Frequency -> Frequency -> Offset -> Offset -> State' a -> State' ()
 rollout s e f offsetFixing offsetPayment exp =
-  let (State' (_, state)) = exp (RollOutArg with begin = Obs Start; end = Obs End; dcf = \conv -> Obs $ Dcf Start End conv) in State' ((), Rollout s e f offsetFixing offsetPayment state)
+  let
+    (State' (_, state)) = exp
+  in
+    State' ((), Rollout s e f offsetFixing offsetPayment state)
 
 next : State' ()
 next = State' ((), Next)
-{-
-v = do 
-  give $ payout "USD" 500000.0
-  rollout (lit $ date 2019 Jan 1) (lit $ date 2020 Jan 1) (Months 1) (DaysStart 0) (DaysEnd (-2)) do
-    options do 
-      given (fixingAbs "LIBOR3M" >. 1.5) "exercise"
-                do 
-                  payout "DKK" 400000.0
-                  payout "SEK" 250000.0
-                  next
-      writerGiven true "exercise" do
-        payout "EUR" 50.0
--}
+
 createAgreement : Party -> Party -> Optional Party -> Service -> State' a -> Kontract
 createAgreement holder writer oracle service (State' (_, state)) = Kontract with ..
-
-{-
-irs = do
-  rollout (lit $ date 2020 Jan 1) (lit $ date 2025 Jan 1) (Months 1) (DaysStart 0) (DaysEnd 0) do
-    scale 1000000.0 (payout "USD" (fixing "LIBOR1M" * dcf_ "Act/365" ))
--}
---template instance AgreementPS = Agreement IouTag (ContractId Iou)
---template instance MultiSigAgreement = MultiSign AgreementPS
