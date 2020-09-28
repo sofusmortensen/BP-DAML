@@ -1,0 +1,64 @@
+module Test.Account where
+
+import Daml.Script
+
+import Account
+import Effect
+import Util
+
+test = script do
+  [issuer, alice, bob] <- mapA allocateParty ["bank", "alice", "bob"]
+
+  let asset = "EUR"
+
+  let accountAlice = Account with
+        owner = alice
+        accountNo = "00001"
+        amount = 10000.0
+        ..
+
+  let accountBob = Account with
+        owner = bob
+        accountNo = "00002"
+        amount = 0.0
+        ..
+
+  _create issuer $ AccountIssuance accountAlice
+  _create issuer $ AccountIssuance accountBob
+
+  submit alice do
+    exerciseByKeyCmd @AccountIssuance (issuer, accountAlice.accountNo) AccountIssuance_Accept
+
+  submit bob do
+    exerciseByKeyCmd @AccountIssuance (issuer, accountBob.accountNo) AccountIssuance_Accept
+
+  let aggAlice = TransferAgreement with
+                  service = Service issuer ""
+                  party = alice
+                  account = "00001"
+
+  let aggBob = TransferAgreement with
+                  service = Service issuer ""
+                  party = bob
+                  account = "00002"
+
+  cid <- _create issuer $ TransferAgreementProposal aggAlice
+  aliceAggId <- _exercise alice cid TransferAgreementProposal_Sign
+  
+  cid <- _create issuer $ TransferAgreementProposal aggBob
+  bobAggId <- _exercise bob cid TransferAgreementProposal_Sign
+
+  let transfer = Transfer with 
+                    service = Service with issuer = issuer; id = ""
+                    payer = alice
+                    payee = bob
+                    asset = "EUR"
+                    amount = 150.0
+
+  cid <- _create alice TransferProposal with transfer
+  tid <- _exercise bob cid TransferProposal_Accept
+
+  Some tid <- _exercise' alice aliceAggId (SettlePayer tid)
+  None <- _exercise' bob bobAggId (SettlePayee tid)
+
+  pure ()

@@ -1,0 +1,148 @@
+
+module Test.CordaExamples where
+
+import DA.Date
+
+import Daml.Script
+
+import Kontract
+import Util
+import Effect
+
+cordaExample1 = script do
+
+  setTime $ datetime 2020 Sep 10 12 0 0
+
+  acmeCorp <- allocateParty "acme corporation"
+  highStreetBank <- allocateParty "high street bank"
+
+  let european_fx_option =
+
+        kontract do
+          holder_can anytime "exercise" $ kontract do
+            any_can (after maturity) "execute" do
+              payout "EUR" 1_000_000
+              give $ payout "USD" 1_200_000
+          writer_can (after maturity) "expire" void        
+
+        where
+          maturity = lit $ cutLondon $ date 2020 Dec 1
+
+
+  let european_fx_option' =
+
+        kontract do
+          holder_can (after maturity) "exercise" do
+            payout "EUR" 1_000_000
+            give $ payout "USD" 1_200_000
+          writer_can (after maturity) "expire" void
+
+        where
+          maturity = lit $ cutLondon $ date 2020 Dec 1
+
+
+  -- setting up the actual DAML contract (wasn't in the Corda example):
+  prop <- _create highStreetBank MultiSign 
+    with 
+      signed = [highStreetBank]; toSign = [acmeCorp]
+      contract = createAgreement 
+          acmeCorp highStreetBank None (Service highStreetBank "cash") european_fx_option
+
+  Right cid <- _exercise' acmeCorp prop MultiSign_Sign
+
+  -- bank is not allowed to exercise
+  _exerciseMustFail' highStreetBank cid (Select "exercise")
+
+  -- bank selects "expire" but given time is before expiry, this is only a pre-selection
+  [Left cid] <- _exercise' highStreetBank cid (Select "expire")
+
+  [Left cid] <- _exercise' acmeCorp cid (Select "exercise")
+
+  setTime $ datetime 2020 Dec 2 12 0 0
+
+  [Right cid1, Right cid2] <- _exercise' acmeCorp cid (Select "execute")
+
+  return ()
+
+cordaExample2 = script do
+
+  setTime $ datetime 2020 Sep 10 12 0 0
+
+  acmeCorp <- allocateParty "acme corporation"
+  highStreetBank <- allocateParty "high street bank"
+
+  let european_fx_option =
+
+        kontract do
+          holder_can (after maturity) "exercise" do
+            payout "EUR" 1_000_000
+            give $ payout "USD" 1_200_000
+          writer_can (after maturity) "expire" void
+
+        where
+          maturity = lit $ cutLondon $ date 2020 Dec 1
+
+  -- setting up the actual DAML contract (wasn't in the Corda example):
+  prop <- _create highStreetBank MultiSign 
+    with 
+      signed = [highStreetBank]; toSign = [acmeCorp]
+      contract = createAgreement 
+          acmeCorp highStreetBank None (Service highStreetBank "cash") european_fx_option
+
+  Right cid <- _exercise' acmeCorp prop MultiSign_Sign
+
+  -- bank is not allowed to exercise
+  _exerciseMustFail' highStreetBank cid (Select "exercise")
+
+  -- bank selects "expire" but given time is before expiry, this is only a pre-selection
+  [Left cid] <- _exercise' highStreetBank cid (Select "expire")
+
+  [Left cid] <- _exercise' acmeCorp cid (Select "exercise")
+
+  setTime $ datetime 2020 Dec 2 12 0 0
+
+  [Right cid1, Right cid2] <- _exercise' acmeCorp cid Lifecycle
+
+  --[Right cid1, Right cid2] <- _exercise' acmeCorp cid (Select "execute")
+
+  return ()
+
+cordaExample3 = script do
+
+  setTime $ datetime 2020 Sep 10 12 0 0
+
+  acmeCorp <- allocateParty "acme corporation"
+  highStreetBank <- allocateParty "high street bank"
+
+  let european_fx_option =
+
+        kontract do
+          holder_can (after maturity) "exercise" do
+            payout "EUR" 1_000_000
+            give $ payout "USD" 1_200_000
+          writer_can (after maturity) "expire" void
+
+        where
+          maturity = lit $ cutLondon $ date 2020 Dec 1
+
+  -- setting up the actual DAML contract (wasn't in the Corda example):
+  prop <- _create highStreetBank MultiSign 
+    with 
+      signed = [highStreetBank]; toSign = [acmeCorp]
+      contract = createAgreement 
+          acmeCorp highStreetBank None (Service highStreetBank "cash") european_fx_option
+
+  Right cid <- _exercise' acmeCorp prop MultiSign_Sign
+
+  -- bank is not allowed to exercise
+  _exerciseMustFail' highStreetBank cid (Select "exercise")
+
+  -- bank selects "expire" but given time is before expiry, this is only a pre-selection
+  [Left cid] <- _exercise' highStreetBank cid (Select "expire")
+
+  setTime $ datetime 2020 Dec 2 12 0 0
+
+  -- should void the contract given there's no exercise selection, and bank has selected to expire
+  [] <- _exercise' acmeCorp cid Lifecycle
+
+  return ()

@@ -1,12 +1,19 @@
 module Util where
 
 import Daml.Script
+import DA.Stack
 
-_exercise' : HasSubmit m Commands => forall t c r. Choice t c r => Party -> ContractId t -> (Party -> c) -> m r
+_exercise' : HasCallStack => HasSubmit m Commands => forall t c r. Choice t c r => Party -> ContractId t -> (Party -> c) -> m r
 _exercise' p cid c = submit p $ exerciseCmd cid (c p)
+
+_exerciseMustFail' : HasSubmit m Commands => forall t c r. Choice t c r => Party -> ContractId t -> (Party -> c) -> m ()
+_exerciseMustFail' p cid c = submitMustFail p $ exerciseCmd cid (c p)
 
 _exercise : HasSubmit m Commands => forall t c r. Choice t c r => Party -> ContractId t -> c -> m r
 _exercise p cid c = submit p $ exerciseCmd cid c
+
+_exerciseMustFail : HasSubmit m Commands => forall t c r. Choice t c r => Party -> ContractId t -> c -> m ()
+_exerciseMustFail p cid c = submitMustFail p $ exerciseCmd cid c
 
 _create : (HasSignatory t, HasObserver t, HasEnsure t, HasAgreement t, HasCreate t, HasFetch t, HasArchive t, HasTemplateTypeRep t, HasToAnyTemplate t, HasFromAnyTemplate t) => Party -> t -> Script (ContractId t)
 _create p c = submit p $ createCmd c
@@ -18,3 +25,5 @@ _if False = const None
 instance Functor ((,,) a b) where
   fmap f (x, y, z) = (x, y, f z)
   v <$ (x, y, _) = (x, y, v)
+
+undefined = error "not implemented"

@@ -1,0 +1,220 @@
+module Test.Bp where
+
+import DA.Assert
+
+import Daml.Script
+
+import Bp
+import Effect qualified as E
+import Util
+
+mybp = script do
+  acme <- allocateParty "acme"
+  highStreetBank <- allocateParty "high street bank"
+  rr <- allocateParty "road runner"
+  wc <- allocateParty "wildey coyote"
+
+  let pp = do
+        service acme "ini A"
+        select acme "proceed?" do
+          ch "accept" $ service acme "ok B"
+          ch "reject" do service acme "reject C"; cancel
+
+        in_parallel do
+          line do
+            select acme "proceed?" do
+              ch "accept" do
+                service acme "ok D"
+              ch "reject" do
+                service highStreetBank "ok D"
+                cancel
+
+          line do
+            select highStreetBank "proceed?" do
+              ch "accept" do
+                service highStreetBank "accept E"
+
+          line do
+            select rr "proceed?" do
+              ch "accept" do
+                service rr "meek meek"
+
+        race do
+          line do
+            select acme "proceed?" do
+              ch "accept" $ service acme "acme"
+          line do
+            select rr "proceed?" do
+              ch "accept" $ service acme "rr"
+
+        service wc "all done F"
+
+  cid <- issueProcess acme pp
+
+  _exercise' acme cid Status >>= debug
+
+  Some cid <- _exercise' acme cid $ Select 0 "accept"
+
+  _exercise' acme cid Status >>= debug
+
+  Some cid <- _exercise' highStreetBank cid $ Select 1 "accept"
+
+  _exercise' acme cid Status >>= debug
+
+  Some cid <- _exercise' acme cid $ Select 0 "accept"
+
+  _exercise' acme cid Status >>= debug
+
+  Some cid <- _exercise' rr cid $ Select 0 "accept"
+
+  _exercise' acme cid Status >>= debug
+
+  None     <- _exercise' rr cid $ Select 1 "accept"
+
+  assert True
+
+
+mybp1 = script do
+  acme <- allocateParty "acme"
+  highStreetBank <- allocateParty "high street bank"
+
+  let pp = proc do
+        in_parallel do
+          line do
+            select acme "proceed?" do
+              ch "accept" do
+                service acme "ok D"
+
+          line do
+            select highStreetBank "proceed?" do
+              ch "accept" do
+                service highStreetBank "accept E"
+
+        service acme "all done F"
+
+  [acme] === getControllers pp 0
+  [highStreetBank] === getControllers pp 1
+
+  assert True
+
+mybp2 = script do
+  acme <- allocateParty "acme"
+  highStreetBank <- allocateParty "high street bank"
+
+  let pp = proc do
+        select acme "proceed?" do
+          ch "accept" do
+            service acme "ok D"
+
+        service acme "all done F"
+
+  [acme] === getControllers pp 0
+  [] === getControllers pp 1
+
+mybp3 = script do
+  acme <- allocateParty "acme"
+  highStreetBank <- allocateParty "high street bank"
+  roadrunner <- allocateParty "roadrunner"
+
+  let pp = proc do
+      in_parallel do
+        line $ in_parallel do
+          line do
+            select acme "proceed?" do
+              ch "accept" do
+                service acme "ok D"
+
+          line do
+            select highStreetBank "proceed?" do
+              ch "accept" do
+                service highStreetBank "accept E"
+
+        line do
+          select roadrunner "proceed?" do
+            ch "accept" do
+              service highStreetBank "accept F"
+
+      service acme "all done G"
+
+  debug pp
+
+  [acme] === getControllers pp 0
+  [highStreetBank] === getControllers pp 1
+  [roadrunner] === getControllers pp 2
+
+ack party description = do
+  service party ("Request: " <> description)
+  select party "proceed?" do
+    ch "ack" nop
+
+ackNosign party description = do
+  service party ("Request: " <> description)
+  select party "proceed?" do
+    chNosign "ack" nop
+
+commercialFinancing = script do
+
+  sales <- allocateParty "sales"
+  treasury <- allocateParty "treasury"
+  admin <- allocateParty "administration"
+  credit <- allocateParty "credit"
+  cust <- allocateParty "customer"
+  bank <- allocateParty "bank"
+
+  let svc = E.Service bank "cash"
+
+  cid <- issueProcess sales do
+
+    ack sales "Consolidate and Digitize Data"
+    ack sales "Analyze Financial Data"
+    select sales "Qualified Request?" do
+      ch "Yes" do
+        ack credit "Verify Credit Record with Credit Offices"
+        ack treasury "Sign-off from Treasury"
+        ackNosign admin "Prepare Detailed Analysis of Financial Data"
+        ack sales "Prepare Detailed Analysis"
+        select sales "Qualified Request?" do
+          ch "Yes" do
+            ack sales "Elaborate Commercial Financing Reporting"
+            select cust "Accept?" do
+              ch "No" do
+                ack sales "Prepare and Transmit Refusal Letter"
+                cancel
+              ch "Yes" do
+                transfer svc cust credit "EUR" 10000.0
+                transfer svc admin cust "CHF" 12000.0
+                ack sales "Complete purchase"
+          ch "No" do
+            ack sales "Prepare and Transmit Refusal Letter"
+            cancel
+      ch "No" do
+        ack sales "Prepare and Transmit Refusal Letter"
+        cancel
+
+    service sales "Complete"
+
+  Some cid <- _exercise' sales    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "Yes"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' credit   cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' treasury cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' admin    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "Yes"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' sales    cid $ Select 0 "ack"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' cust     cid $ Select 0 "Yes"
+  _exercise' sales cid Status >>= debug
+  Some cid <- _exercise' admin    cid $ Select 0 "Sign"
+  _exercise' sales cid Status >>= debug
+  -- None     <- _exercise' sales    cid $ Select 0 "ack"
+
+  pure ()

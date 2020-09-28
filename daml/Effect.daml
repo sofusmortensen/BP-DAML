@@ -6,6 +6,7 @@ data Service =
   Service with issuer : Party; id : Text
   deriving (Eq, Show)
 
+type EffectId = ContractId Effect
 template Effect
   with
     issuer : Set Party
@@ -14,6 +15,7 @@ template Effect
   where
     signatory issuer
 
+type TransferId = ContractId Transfer
 template Transfer
   with
     service : Service

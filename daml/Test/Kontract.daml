@@ -1,0 +1,120 @@
+module Test.Kontract where
+
+import DA.Date
+
+import Daml.Script
+
+import Kontract
+import Effect
+import Util
+
+test_1 = script do
+  let zcb = do
+        holder_can (after $ cutLondon $ date 2019 Sep 10) "exercise" do
+          payout "DKK" $ l 1000.0
+
+  let fwd maturity st = kontract do
+        any_can (after maturity) "exercise" st 
+
+  let european maturity st = kontract do
+        holder_can anytime "exercise" $ fwd maturity st
+        writer_can (after maturity) "expire" void
+
+  let fxcall maturity forccy domccy strike nominal =
+        european maturity do
+          payout forccy nominal
+          give $ payout domccy (strike * nominal)
+
+  let ss = let
+             nominal = lit 10000000.0
+             fixedrate = lit 0.012 
+           in rollout (lit $ date 2019 Sep 1) (Years 3) (Months 3) (DaysStart 0) (DaysEnd 2) \p -> do
+             let floatLeg = nominal * fixing "USDLIBOR3M" * p.dcf "act/365"
+             let fixedLeg = nominal * fixedrate * p.dcf "act/act"
+             payout "DKK" floatLeg
+             give $ payout "DKK" fixedLeg
+             kontract do
+               holder_can (before p.end) "cancel" $ void
+               any_can (after p.end) "continue" $ next
+{-
+  let euroCall maturity forccy domccy strike nominal = options do
+        given true "exercise" do
+          options do
+            anyGiven (after $ cutLondon $ maturity) "exercise" do
+              payout forccy nominal
+              give $ payout domccy (strike * nominal)
+        writerGiven (after $ cutLondon $ maturity) "expire" do
+          void
+
+  let fxOption forccy domccy strike = do
+      given ( after $ cutLondon $ date 2019 Sep 10 ) "exercise"
+        do
+          payout forccy strike
+          give $ payout domccy 1.0
+
+  let s = give $ options do
+      given (fixing "LIBOR3M" >. lit 2.0) "exercise" do
+        payout "USD" 1000.0
+-}
+  pure 1
+
+ldate y m d = lit $ date y m d
+
+swapExample = script do
+  alice <- allocateParty "alice"
+  bob <- allocateParty "bob"
+  acme <- allocateParty "acme"
+  issuer <- allocateParty "bank"
+
+  let swapContract = 
+          let
+            nominal = lit 10000000.0
+            fixedrate = lit 0.012 
+          in 
+            rollout (ldate 2019 Sep 1) -- start
+                    (Years 3) -- end
+                    (Months 3)         -- frequency
+                    (DaysStart 0)      -- fixing 
+                    (DaysEnd 2)        -- payment
+                    \p -> do
+              let floatLeg = nominal * fixing "USDLIBOR3M" * p.dcf "act/365"
+              let fixedLeg = nominal * fixedrate * p.dcf "act/act"
+              payout "USD" floatLeg
+              give $ payout "USD" fixedLeg
+              kontract do
+                any_can anytime "continue" $ next
+  
+  let proposal = createAgreement alice bob (Some acme) (Service issuer "cash") swapContract
+    
+  prop <- submit bob $ createCmd MultiSign with signed = [bob]; toSign = [alice]; contract = proposal
+  Right cid <- submit alice $ exerciseCmd prop $ MultiSign_Sign alice
+
+
+  _ <-
+    submit acme $ exerciseCmd cid Publish with name = "USDLIBOR3M"; fixingDate = date 2019 Sep 1; value = 0.15
+    
+  return ()
+  
+main = script do
+  alice <- allocateParty "alice"
+  bob <- allocateParty "bob"
+  acme <- allocateParty "acme"
+  issuer <- allocateParty "bank"
+  
+  let proposal = 
+        createAgreement alice bob (Some acme) (Service issuer "cash") do
+          kontract do
+            holder_can (fixingAbs "LIBOR3M" >. l 2.0) "call" do
+              payout "USD" 1000 
+              give $ payout "GBP" 800
+
+  prop <- submit bob $ createCmd MultiSign with signed = [bob]; toSign = [alice]; contract = proposal
+  Right cid <- submit alice $ exerciseCmd prop $ MultiSign_Sign alice
+
+  [Left cid] <-
+    submit acme $ exerciseCmd cid Publish with name = "LIBOR3M"; fixingDate = date 2019 Jan 1; value = 2.5
+
+  {- [Right cid1, Right cid2] <- -} 
+  _exercise' alice cid (Select "call")
+
+  return ()

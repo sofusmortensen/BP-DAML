@@ -1,0 +1,14 @@
+daml 1.2
+module Map where
+
+import Prelude as P
+
+data Map k v = Map [(k, v)]
+
+lookup : Eq k => k -> Map k v -> Optional v
+lookup v (Map l) = P.lookup v l 
+
+empty = Map []
+
+insert : k -> v -> Map k v -> Map k v
+insert k v (Map l) = Map $ (k,v)::l  
