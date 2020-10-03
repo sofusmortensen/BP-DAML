@@ -1,0 +1,40 @@
+module Test.KontractRollout where
+
+import Daml.Script
+import DA.Date
+import DA.Either
+
+import Kontract
+import Effect
+import Util
+
+test = script do
+
+  setTime $ datetime 2019 Sep 1 12 0 0
+
+  [alice, bob, acme, issuer] <- mapA allocateParty ["alice", "bob", "acme", "issuer"]
+
+  let rolloutTest = 
+        rollout
+          (ldate 2019 Oct 1)
+          (Months 1)
+          6
+          (FromStart $ Days 0)
+          (FromEnd $ Days 0)
+        do 
+          payout "CHF" 1000
+
+  let proposal = createAgreement alice bob (Some acme) (Service issuer "cash") rolloutTest
+    
+  prop <- submit bob $ createCmd MultiSign with signed = [bob]; toSign = [alice]; contract = proposal
+  Right cid <- submit alice $ exerciseCmd prop $ MultiSign_Sign alice
+
+  l <- _exercise' alice cid Lifecycle
+
+--  l <- mapA (flip (_exercise' alice) Lifecycle) (lefts l)
+
+  setTime $ datetime 2020 Mar 10 12 0 0
+
+  l <- mapA (flip (_exercise' alice) Lifecycle) (lefts l)
+
+  pure ()

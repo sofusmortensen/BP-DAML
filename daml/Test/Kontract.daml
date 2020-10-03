@@ -31,8 +31,11 @@ test_1 = script do
           fixedrate = lit 0.012 
         in 
           rollout
-            (lit $ date 2019 Sep 1) (Years 3) (Months 3)
-            (DaysStart 0) (DaysEnd 2)
+            (lit $ date 2019 Sep 1)    
+            (Months 3)
+            12
+            (daysStart 0) -- fix at start of period
+            (daysEnd 2) -- payment 
           do
               let floatLeg = nominal * fixing "USDLIBOR3M" * dcf "act/365"
               let fixedLeg = nominal * fixedrate * dcf "act/act"
@@ -63,8 +66,6 @@ test_1 = script do
 -}
   pure 1
 
-ldate y m d = lit $ date y m d
-
 swapExample = script do
   alice <- allocateParty "alice"
   bob <- allocateParty "bob"
@@ -77,10 +78,10 @@ swapExample = script do
             fixedrate = lit 0.012 
           in 
             rollout (ldate 2019 Sep 1) -- start
-                    (Years 3) -- end
                     (Months 3)         -- frequency
-                    (DaysStart 0)      -- fixing 
-                    (DaysEnd 2)        -- payment
+                    12
+                    (FromStart $ Days 0)      -- fixing 
+                    (FromEnd $ Days 2)        -- payment
             do
               let floatLeg = nominal * fixing "USDLIBOR3M" * dcf "act/365"
               let fixedLeg = nominal * fixedrate * dcf "act/act"

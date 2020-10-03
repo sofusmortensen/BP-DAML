@@ -13,8 +13,8 @@ import Util
 
 type KontractId = ContractId Kontract
 
-pay : Service -> Party -> Party -> Text -> Decimal -> Update TransferId
-pay service payer payee asset amount = create Transfer with ..
+createPayEffect : Service -> Party -> Party -> Text -> Decimal -> Update TransferId
+createPayEffect service payer payee asset amount = create Transfer with ..
 
 template MultiSign
   with
@@ -59,8 +59,6 @@ data Observable = Constant Decimal
                            dayCountConvention: Text
                 deriving (Eq, Show)
 
-data ContextRollBody = ContextRollBody {}
-
 fixing : Text -> Obs Decimal
 fixing = Obs . FixingOnDate
 
@@ -76,31 +74,43 @@ never = lit False
 l : Decimal -> Obs Decimal
 l = lit
 
+ldate : Int -> Month -> Int -> Obs Date
+ldate y m d = lit $ date y m d
+
 class IsObservable a where
   lit : a -> Obs a
+  castRaw : Decimal -> a
+
   fromObs : Obs a -> Optional a
+  fromObs (Obs (Constant x)) = Some $ castRaw x
+  fromObs _ = None
 
 instance IsObservable Int where
   lit = Obs . Constant . intToDecimal
-  fromObs (Obs o) = case o of Constant x -> Some $ truncate x; _ -> None
+  castRaw = truncate
+--  fromObs (Obs o) = case o of Constant x -> Some $ truncate x; _ -> None
 
 instance IsObservable Decimal where
   lit x = Obs $ Constant $ cast x
-  fromObs (Obs o) = case o of Constant x -> Some x; _ -> None
+  castRaw = identity
+--  fromObs (Obs o) = case o of Constant x -> Some x; _ -> None
 
 instance IsObservable Bool where
   lit x = if x then Obs $ Constant 1.0 else Obs $ Constant 0.0
-  fromObs (Obs o) = case o of Constant x -> Some $ x >= 0.5; _ -> None
+  castRaw = (>=0.5)
+--  fromObs (Obs o) = case o of Constant x -> Some $ x >= 0.5; _ -> None
 
 instance IsObservable Date where
   lit d = (Obs . Constant . intToDecimal) days
           where days = subDate d epochDate
-  fromObs (Obs o) = case o of Constant x -> Some $ addDays epochDate $ truncate x; _ -> None
+  castRaw = addDays epochDate . truncate
+--  fromObs (Obs o) = case o of Constant x -> Some $ addDays epochDate $ truncate x; _ -> None
 
 instance IsObservable Time where
   lit d = (Obs . Constant . intToDecimal) msec
         where msec = convertRelTimeToMicroseconds $ subTime d epochTime
-  fromObs (Obs o) = case o of Constant x -> Some $ addRelTime epochTime $ convertMicrosecondsToRelTime $ truncate x; _ -> None
+  castRaw = addRelTime epochTime . convertMicrosecondsToRelTime . truncate
+--  fromObs (Obs o) = case o of Constant x -> Some $ addRelTime epochTime $ convertMicrosecondsToRelTime $ truncate x; _ -> None
 
 instance IsObservable a => Additive (Obs a) where
   (Obs x) + (Obs y) = Obs $ Plus x y
@@ -170,16 +180,40 @@ data Transition = Transition
     state : State
   deriving (Eq, Show)
 
-reduce : Time -> Optional Date -> M.Map (Text, Date) Decimal -> Obs a -> Obs a
-reduce now fixingdate fixings (Obs o) = Obs $ reduce_ now fixingdate fixings o
+applyFixingToObs_ : Text -> Optional Date -> Decimal -> Observable -> Observable
+applyFixingToObs_ name fixingdate value o =
+  case o of
+    FixingAbs l -> case fixingdate of
+      Some date -> FixingAbs l
+      None -> if l == name then Constant value else FixingAbs l
+    FixingOnDate l -> case fixingdate of
+      Some date -> FixingAbs l
+      None -> if l == name then Constant value else FixingAbs l
+    Plus x y -> Plus (f x) (f y)
+    Div x y -> Div (f x) (f y)
+    Mul x y -> Mul (f x) (f y)
+    Negate x -> Negate (f x)
+    Sign x -> Sign (f x)
+    Abs x -> Abs (f x)
+    Max x y -> Max (f x) (f y)
+    Min x y -> Min (f x) (f y)
+    LessThan x y -> LessThan (f x) (f y)
+    Equal x y -> Equal (f x) (f y)
+    After x -> After (f x)
+    _ -> o
+  where
+    f = applyFixingToObs_ name fixingdate value
 
-reduce_ : Time -> Optional Date -> M.Map (Text, Date) Decimal -> Observable -> Observable
-reduce_ now fixingdate fixings = \case
+reduce : Time -> Obs a -> Obs a
+reduce now (Obs o) = Obs $ reduce_ now o
+
+reduce_ : Time -> Observable -> Observable
+reduce_ now = \case
     Constant v -> Constant v
-    FixingAbs l ->
-      optional (FixingOnDate l) (\x -> case M.lookup (l, x) fixings of None -> FixingOnDate l; Some v -> Constant v) fixingdate
-    FixingOnDate l -> 
-      optional (FixingOnDate l) (\x -> case M.lookup (l, x) fixings of None -> FixingOnDate l; Some v -> Constant v) fixingdate
+    FixingAbs l -> undefined
+    --  optional (FixingOnDate l) (\x -> case M.lookup (l, x) fixings of None -> FixingOnDate l; Some v -> Constant v) fixingdate
+    FixingOnDate l -> undefined
+    --  optional (FixingOnDate l) (\x -> case M.lookup (l, x) fixings of None -> FixingOnDate l; Some v -> Constant v) fixingdate
     Start -> Start
     End -> End
     Var _ -> error "Var not implemented"
@@ -195,14 +229,14 @@ reduce_ now fixingdate fixings = \case
     Min x y -> fn2 min x y Min
     LessThan x y -> fn2 (\x' y' -> if x' < y' then 1.0 else 0.0) x y LessThan
     Equal x y -> fn2 (\x' y' -> if x' == y' then 1.0 else 0.0) x y Equal
-    After maturity -> case reduce_ now fixingdate fixings maturity of
+    After maturity -> case reduce_ now maturity of
                         Constant m -> if now > (addRelTime epochTime (convertMicrosecondsToRelTime $ truncate m)) then Constant 1.0 else After $ Constant m
                         x' -> After x'
   where
-    fn2 op x y c = case (reduce_ now fixingdate fixings x, reduce_ now fixingdate fixings y) of
+    fn2 op x y c = case (reduce_ now x, reduce_ now y) of
                 (Constant x', Constant y') -> Constant $ x' `op` y'
                 (x', y') -> c x' y'
-    fn1 op x c = case reduce_ now fixingdate fixings x of
+    fn1 op x c = case reduce_ now x of
                 Constant x' -> Constant $ op x'
                 x' -> c x'
 
@@ -221,12 +255,51 @@ data Obs a = Obs Observable
 
 type Transitions = [Transition]
 
-data Frequency = Days Int | Weeks Int | Months Int | Years Int
-                 deriving (Eq, Show)
+data Period = Days Int | Weeks Int | Months Int | Years Int
+              deriving (Eq, Show)
 
-data Offset = DaysStart Int | DaysEnd Int deriving (Eq, Show)
+data Offset = FromStart Period | FromEnd Period deriving (Eq, Show)
 
-data ContextGlobal = ContextGlobal {}
+dateFromOffsetAndRange : Offset -> (Date, Date) -> Date
+dateFromOffsetAndRange (FromStart p) (d, _) = dateShift p d
+dateFromOffsetAndRange (FromEnd p) (_, d) = dateShift p d
+
+
+dateShift : Period -> Date -> Date
+dateShift (Days d) date = addDays date d
+dateShift (Weeks w) date = addDays date $ w * 7
+dateShift (Months dm) date =
+  let (y, m, d) = toGregorian date
+      m' = (fromEnum m) + dm
+      ym = if m' >= 0 then (m' + 1) / 12 else (m' + 1) / 12 - 1
+      y' = ym + y
+      m'' = toEnum $ m' - 12 * ym 
+      d' = min d (monthDayCount y' m'')
+  in  fromGregorian (y', m'', d')
+dateShift (Years ym) date =
+  let (y, m, d) = toGregorian date
+  in  fromGregorian (y + ym, m, d)
+
+dateShift' : Period -> Date -> Int -> Date
+dateShift' (Days d) date i = addDays date (i * d)
+dateShift' (Weeks w) date i = addDays date $ (i * w * 7)
+dateShift' (Months dm) date i =
+  let (y, m, d) = toGregorian date
+      m' = (fromEnum m) + i * dm
+      ym = if m' >= 0 then (m' + 0) / 12 else (m' + 1) / 12 - 1
+      y' = ym + y
+      m'' = toEnum $ m' - 12 * ym 
+      d' = min d (monthDayCount y' m'')
+  in  fromGregorian (y', m'', d')
+dateShift' (Years ym) date i =
+  let (y, m, d) = toGregorian date
+  in  fromGregorian (y + i * ym, m, d)
+
+daysEnd : Int -> Offset
+daysEnd = FromEnd . Days
+
+daysStart : Int -> Offset
+daysStart = FromStart . Days
 
 data State = Void
              | And [State]
@@ -235,15 +308,14 @@ data State = Void
              | Scale with sc : Obs Decimal; state : State
              | Branch Transitions
              | Rollout with startDate : Obs Date
-                            endDate : Frequency
-                            frequency : Frequency
+                            count : Int
+                            index : Int
+                            frequency : Period
                             fixingOffset : Offset
                             paymentOffset : Offset
+                            usingContinuation : Bool
                             state : State
-             | Next
---             | LambdaO State
---             | LambdaS State
-             | App with arg : State; body : State
+             | Continue
              deriving (Eq, Show)
 
 class ObsCompare a b where
@@ -306,12 +378,15 @@ instance Scalar (Obs Decimal) where
   scale x (State' (v, s)) = State' (v, Scale x s)
   payout c a = State' ((), Scale a $ One c) : State' ()
 
+
+applyFixing : Text -> Optional Date -> Decimal -> State -> State
+applyFixing name fixingdate value state = state
+
 select : (Actor, Text) -> Bool -> State -> State
 select (actor, name) rev = \case
   Void -> Void
   Rollout { .. } -> Rollout { state = select (actor, name) rev state;.. }
-  Next -> Next
-  App {} -> undefined
+  Continue -> Continue
   And xs -> And $ select (actor, name) rev <$> xs
   One c -> One c
   Give c -> Give $ select (actor, name) (not rev) c
@@ -327,31 +402,50 @@ select (actor, name) rev = \case
 
 --  if optional False (\x -> snd x == t.transitionType._2 && member (fst x) t.transitionType._1) selection
 
-reduceState' : Time -> Optional Date -> M.Map (Text, Date) Decimal -> Decimal -> Bool -> State -> [State]
-reduceState' now fixingdate fixings sc rev = if sc == 0.0 then const [Void] else \case
+data ReduceContext = ReduceContext
+  with
+    fixingDate : Date
+    paymentDate : Time
+    rolloutCont : State
+
+applyContextToPayment : Optional ReduceContext -> Text -> State
+applyContextToPayment (Some ctx) asset
+  = Branch [ Transition with state = One asset; prerequisite = (after $ lit ctx.paymentDate); transitionType = TransitionWhen ]
+applyContextToPayment None asset = One asset
+
+
+reduceState' : Time -> Decimal -> Bool -> Optional ReduceContext -> State -> [State]
+reduceState' now sc rev ctx = if sc == 0.0 then const [Void] else \case
     Void -> []
 
-    -- vvv todo stop if choice was exercised ??
     Rollout with startDate=Obs sd; .. ->
-        case reduce_ now fixingdate fixings sd of
-          Constant sd -> 
- -- todo
- -- reduceState'' with rollout context, payment, fixing dates, plus primed Next with the the next rollout          
-            reduceState' now fixingdate fixings sc rev state
+        case fromObs $ reduce now (Obs sd) of
+          Some anchor -> 
+              if usingContinuation
+              then go index
+              else concat $ go <$> [index .. (count - 1)]
+            where 
+              go i =
+                let
+                  startdate = dateShift' frequency anchor index
+    --              lastdate = dateShift duration startdate
+                  enddate = dateShift' frequency anchor (i + 1)
+                  fixingDate = dateFromOffsetAndRange fixingOffset (startdate, enddate)
+                  paymentDate =  cutLondon $ dateFromOffsetAndRange paymentOffset (startdate, enddate) -- todo, think about payment cut
+                  rolloutCont = if usingContinuation && i + 1 < count then Rollout with startDate = Obs sd; index = i + 1; .. else Void
+                in
+                  reduceState' now sc rev (Some $ ReduceContext with ..) state
           _ -> [Rollout with startDate=Obs sd; .. ] -- startDate = sd; endDate = sd; ..]
 
-        --sd = reduce now fixingdate fixings startDate
-        --ed = reduce now fixingdate fixings endDate
-    Next -> error "Next not implemented"
---    LambdaO _ -> error "Lambda0 not implemented"
---    LambdaS _ -> error "LambdaS not implemented"
-    App _ _ -> error "App not implemented"
-    And xs -> concatMap (reduceState' now fixingdate fixings sc rev) xs
-    One c -> [if rev then Give p else p] where p = Scale (lit sc) $ One c
-    Give c -> reduceState' now fixingdate fixings sc (not rev) c 
-    Scale o s -> case reduce now fixingdate fixings o of
-      Obs (Constant v) -> reduceState' now fixingdate fixings (sc * v) rev s
-      o' -> map (Scale o') (reduceState' now fixingdate fixings sc rev s)
+    Continue -> case ctx of 
+      Some ReduceContext with .. -> reduceState' now sc rev ctx rolloutCont
+      None -> error "Continue used outside recursive Rollout"
+    And xs -> concatMap (reduceState' now sc rev ctx) xs
+    One c -> [if rev then Give p else p] where p = Scale (lit sc) $ applyContextToPayment ctx c
+    Give c -> reduceState' now sc (not rev) ctx c 
+    Scale o s -> case reduce now o of
+      Obs (Constant v) -> reduceState' now (sc * v) rev ctx s
+      o' -> map (Scale o') (reduceState' now sc rev ctx s)
     Branch ts -> case res of
                   (x::_, _) -> x
                   ([], []) -> []
@@ -362,10 +456,10 @@ reduceState' now fixingdate fixings sc rev = if sc == 0.0 then const [Void] else
                   proc t =
                     case t.transitionType of
                       TransitionWhen ->
-                        case fromObs $ reduce now fixingdate fixings t.prerequisite of
+                        case fromObs $ reduce now t.prerequisite of
                           None -> Right $ Some t
                           Some False -> Right None
-                          Some True -> Left $ reduceState' now fixingdate fixings sc rev t.state
+                          Some True -> Left $ reduceState' now sc rev ctx t.state
                       TransitionChoice tc ->
                         Right $ Some t
 
@@ -394,9 +488,9 @@ reduceState' now fixingdate fixings sc rev = if sc == 0.0 then const [Void] else
                                   [s] -> Right $ Some t with state = s; prerequisite
                                   xs -> Right $ Some t with prerequisite; state = And xs
 -}
-
-reduceState : Time -> Optional Date -> M.Map (Text, Date) Decimal -> Optional (Actor, Text) -> Decimal -> Bool -> State -> [State]
-reduceState now fixingdate fixings selection sc rev = if sc == 0.0 then const [Void] else \case
+{-
+reduceState : Time -> Optional Date -> M.Map (Text, Date) Decimal -> Optional (Actor, Text) -> Decimal -> Bool -> Optional ReduceContext -> State -> [State]
+reduceState now fixingdate fixings selection sc rev ctx = if sc == 0.0 then const [Void] else \case
     Void -> []
 
     -- vvv todo stop if choice was exercised ??
@@ -411,12 +505,12 @@ reduceState now fixingdate fixings selection sc rev = if sc == 0.0 then const [V
 --    LambdaO _ -> error "Lambda0 not implemented"
 --    LambdaS _ -> error "LambdaS not implemented"
     App _ _ -> error "App not implemented"
-    And xs -> concatMap (reduceState now fixingdate fixings selection sc rev) xs
+    And xs -> concatMap (reduceState now fixingdate fixings selection sc rev ctx) xs
     One c -> [if rev then Give p else p] where p = Scale (lit sc) $ One c
-    Give c -> reduceState now fixingdate fixings selection sc (not rev) c 
+    Give c -> reduceState now fixingdate fixings selection sc (not rev) ctx c 
     Scale o s -> case reduce now fixingdate fixings o of
-      Obs (Constant v) -> reduceState now fixingdate fixings selection (sc * v) rev s
-      o' -> map (Scale o') (reduceState now fixingdate fixings selection sc rev s)
+      Obs (Constant v) -> reduceState now fixingdate fixings selection (sc * v) rev ctx s
+      o' -> map (Scale o') (reduceState now fixingdate fixings selection sc rev ctx s)
     Branch ts -> case res of
                   (x::_, _) -> x
                   ([], []) -> []
@@ -426,7 +520,7 @@ reduceState now fixingdate fixings selection sc rev = if sc == 0.0 then const [V
                   proc : Transition -> Either [State] (Optional (Transition))
                   proc t =
                     let prerequisite = reduce now fixingdate fixings t.prerequisite
-                        state = reduceState now fixingdate fixings None sc rev t.state
+                        state = reduceState now fixingdate fixings None sc rev ctx t.state
                     in  case fromObs prerequisite of
                           Some False -> Right None
                           None -> case state of
@@ -447,15 +541,16 @@ reduceState now fixingdate fixings selection sc rev = if sc == 0.0 then const [V
                                   [Void] -> Right None
                                   [s] -> Right $ Some t with state = s; prerequisite
                                   xs -> Right $ Some t with prerequisite; state = And xs
+-}
 
 type Cid = Either KontractId TransferId
 createFromState : Kontract -> State -> Update Cid
 createFromState this (One currency) = 
-  Right <$> pay this.service this.writer this.holder currency 1.0
+  Right <$> createPayEffect this.service this.writer this.holder currency 1.0
 createFromState this (Give (One currency)) =
-  Right <$> pay this.service this.holder this.writer currency 1.0
-createFromState this (Scale (Obs (Constant amount)) (One currency)) = Right <$> pay this.service this.writer this.holder currency amount
-createFromState this (Give (Scale (Obs (Constant amount)) (One currency))) = Right <$> pay this.service this.holder this.writer currency amount
+  Right <$> createPayEffect this.service this.holder this.writer currency 1.0
+createFromState this (Scale (Obs (Constant amount)) (One currency)) = Right <$> createPayEffect this.service this.writer this.holder currency amount
+createFromState this (Give (Scale (Obs (Constant amount)) (One currency))) = Right <$> createPayEffect this.service this.holder this.writer currency amount
 -- todo createFromState _ (Pay currency amount fromParty toParty) = CIou <$> create Iou with currency; amount; obligor = fromParty; owner = toParty
 createFromState this state = Left <$> create this with state
 
@@ -485,7 +580,7 @@ template Kontract
         let s' = select (ctrl, name) False state
         assertMsg "no can do" $ s' /= state
 
-        let s'' = reduceState' now None M.empty 1.0 False s'
+        let s'' = reduceState' now 1.0 False None s'
         mapA (createFromState this) s''
 
     choice Lifecycle : [Cid]
@@ -494,7 +589,7 @@ template Kontract
       controller actor
       do
         now <- getTime
-        mapA (createFromState this) $ reduceState' now None M.empty 1.0 False state
+        mapA (createFromState this) $ reduceState' now 1.0 False None state
 
 
     choice Publish : [Cid]
@@ -504,7 +599,7 @@ template Kontract
       controller oracle
       do
         now <- getTime
-        mapA (createFromState this) $ reduceState' now (Some fixingDate) (M.insert (name, fixingDate) value M.empty) 1.0 False state
+        mapA (createFromState this) $ reduceState' now 1.0 False None state
 
 -- todo
 {-kontract' : Time -> State -> State
@@ -580,15 +675,23 @@ give (State' (v, s)) = State' (v, Give s)
 one c = One c
 void = State' ((), Void) 
 
-rollout : Obs Date -> Frequency -> Frequency -> Offset -> Offset -> State' a -> State' ()
-rollout s e f offsetFixing offsetPayment exp =
+rollout : Obs Date -> Period -> Int -> Offset -> Offset -> State' a -> State' ()
+rollout sd freq cnt offsetFixing offsetPayment exp =
   let
     (State' (_, state)) = exp
   in
-    State' ((), Rollout s e f offsetFixing offsetPayment state)
+    State' ((), Rollout sd cnt 0 freq offsetFixing offsetPayment False state)
 
-next : State' ()
-next = State' ((), Next)
+rolloutRecurse : Obs Date -> Period -> Int -> Offset -> Offset -> State' a -> State' ()
+rolloutRecurse sd freq cnt offsetFixing offsetPayment exp =
+  let
+    (State' (_, state)) = exp
+  in
+    State' ((), Rollout sd cnt 0 freq offsetFixing offsetPayment True state)
+
+continue : State' ()
+continue = State' ((), Continue)
 
 createAgreement : Party -> Party -> Optional Party -> Service -> State' a -> Kontract
 createAgreement holder writer oracle service (State' (_, state)) = Kontract with ..
+
