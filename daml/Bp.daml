@@ -196,7 +196,7 @@ service p t = BuilderM () $ (Service p t ::)
 
 transfer : E.Service -> Party -> Party -> Text -> Decimal -> Builder
 transfer svc payer payee ccy amount = BuilderM () $ (Transfer tr ::)
-  where tr = E.Transfer svc payer payee ccy amount
+  where tr = E.Transfer svc payer payee ccy amount None
 
 select : Party -> Text -> ChoiceBuilder -> Builder
 select p txt (BuilderM _ xs) = BuilderM () $ \l -> (Decision p txt $ xs []) :: l

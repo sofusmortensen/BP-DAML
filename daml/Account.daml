@@ -53,22 +53,25 @@ template TransferAgreement
            actor : Party
       controller actor
       do
+        time <- getTime
         tr <- fetch transferId
 
         assert $ tr.service == service 
         assert $ tr.payer /= service.issuer
+
+        -- assert that Transfer is at maturity
+        assert $ optional True (<=time) tr.maturity
 
         (cid, acc) <- fetchByKey @Account (service.issuer, account)
         assert $ acc.asset == tr.asset
         archive cid
         create acc with amount = acc.amount - tr.amount
 
-        if tr.payee == service.issuer then
-          do
+        if tr.payee == service.issuer
+          then do
             archive transferId
             return None
-        else
-          do
+          else do
             (transferId, transferId2) <- exercise transferId Split
             archive transferId2
             return $ Some transferId

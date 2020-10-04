@@ -1,6 +1,7 @@
 module Effect where
 
 import DA.Next.Set
+import DA.Assert
 
 data Service = 
   Service with issuer : Party; id : Text
@@ -23,11 +24,12 @@ template Transfer
     payee : Party
     asset : Text
     amount : Decimal
+    maturity : Optional Time
   where
     signatory payer, payee
     observer service.issuer
 
-    ensure payer /= payee
+    ensure payer /= payee && amount >= 0.0
 
     choice Split : (ContractId Transfer, ContractId Transfer)
       controller service.issuer
@@ -35,6 +37,38 @@ template Transfer
         l <- create this with payer = service.issuer
         r <- create this with payee = service.issuer
         return (l, r)
+
+    choice Mature : ContractId Transfer
+      with
+        actor : Party
+      controller actor
+      do
+        time <- getTime
+        assert $ optional False (<=time) maturity
+        create this with maturity = None
+
+    choice NetWith : Optional (ContractId Transfer)
+      with
+        tid : ContractId Transfer
+      controller payee
+      do
+        time <- getTime
+        that <- fetch tid
+
+        service === that.service
+
+        archive tid
+        if payer == that.payee && payee == that.payer
+          then do
+            if (that.amount == amount)        
+              then return None
+              else if (that.amount < amount)
+                then Some <$> create this with amount = amount - that.amount
+                else Some <$> create that with amount = that.amount - amount
+          else if payer == that.payer && payee == that.payee
+            then Some <$> create this with amount = amount + that.amount
+            else error "invalid operation"
+
 
 template TransferProposal
   with

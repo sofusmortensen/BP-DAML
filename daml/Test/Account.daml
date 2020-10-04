@@ -54,6 +54,7 @@ test = script do
                     payee = bob
                     asset = "EUR"
                     amount = 150.0
+                    maturity = None
 
   cid <- _create alice TransferProposal with transfer
   tid <- _exercise bob cid TransferProposal_Accept

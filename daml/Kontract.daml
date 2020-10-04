@@ -5,16 +5,20 @@ import DA.Either
 import DA.Time
 import DA.Date
 import DA.List
-import Map qualified as M
 import DA.Numeric
 
 import Effect
-import Util
 
 type KontractId = ContractId Kontract
 
-createPayEffect : Service -> Party -> Party -> Text -> Decimal -> Update TransferId
-createPayEffect service payer payee asset amount = create Transfer with ..
+createPayEffect : Service -> Party -> Party -> Text -> Decimal -> Optional Time -> Update TransferId
+createPayEffect service payer payee asset amount (Some maturity) = do
+  time <- getTime
+  if time >= maturity
+    then create Transfer with maturity = None; ..
+    else create Transfer with maturity = Some maturity; ..
+createPayEffect service payer payee asset amount None = do
+  create Transfer with maturity = None; ..
 
 template MultiSign
   with
@@ -88,29 +92,24 @@ class IsObservable a where
 instance IsObservable Int where
   lit = Obs . Constant . intToDecimal
   castRaw = truncate
---  fromObs (Obs o) = case o of Constant x -> Some $ truncate x; _ -> None
 
 instance IsObservable Decimal where
   lit x = Obs $ Constant $ cast x
   castRaw = identity
---  fromObs (Obs o) = case o of Constant x -> Some x; _ -> None
 
 instance IsObservable Bool where
   lit x = if x then Obs $ Constant 1.0 else Obs $ Constant 0.0
   castRaw = (>=0.5)
---  fromObs (Obs o) = case o of Constant x -> Some $ x >= 0.5; _ -> None
 
 instance IsObservable Date where
   lit d = (Obs . Constant . intToDecimal) days
           where days = subDate d epochDate
   castRaw = addDays epochDate . truncate
---  fromObs (Obs o) = case o of Constant x -> Some $ addDays epochDate $ truncate x; _ -> None
 
 instance IsObservable Time where
   lit d = (Obs . Constant . intToDecimal) msec
         where msec = convertRelTimeToMicroseconds $ subTime d epochTime
   castRaw = addRelTime epochTime . convertMicrosecondsToRelTime . truncate
---  fromObs (Obs o) = case o of Constant x -> Some $ addRelTime epochTime $ convertMicrosecondsToRelTime $ truncate x; _ -> None
 
 instance IsObservable a => Additive (Obs a) where
   (Obs x) + (Obs y) = Obs $ Plus x y
@@ -180,6 +179,9 @@ data Transition = Transition
     state : State
   deriving (Eq, Show)
 
+applyFixingToObs : IsObservable a => Text -> Optional Date -> Decimal -> Obs a -> Obs a
+applyFixingToObs name fixingdate value (Obs o) = Obs $ applyFixingToObs_ name fixingdate value o
+
 applyFixingToObs_ : Text -> Optional Date -> Decimal -> Observable -> Observable
 applyFixingToObs_ name fixingdate value o =
   case o of
@@ -210,9 +212,9 @@ reduce now (Obs o) = Obs $ reduce_ now o
 reduce_ : Time -> Observable -> Observable
 reduce_ now = \case
     Constant v -> Constant v
-    FixingAbs l -> undefined
+    FixingAbs l -> FixingAbs l 
     --  optional (FixingOnDate l) (\x -> case M.lookup (l, x) fixings of None -> FixingOnDate l; Some v -> Constant v) fixingdate
-    FixingOnDate l -> undefined
+    FixingOnDate l -> FixingOnDate l 
     --  optional (FixingOnDate l) (\x -> case M.lookup (l, x) fixings of None -> FixingOnDate l; Some v -> Constant v) fixingdate
     Start -> Start
     End -> End
@@ -304,7 +306,7 @@ daysStart = FromStart . Days
 data State = Void
              | And [State]
              | Give State
-             | One with currency : Text
+             | Pay with asset : Text; amount : Decimal; maturity : Optional Time
              | Scale with sc : Obs Decimal; state : State
              | Branch Transitions
              | Rollout with startDate : Obs Date
@@ -359,7 +361,7 @@ scale_ : Obs Decimal -> State' b -> State' b
 scale_ x (State' (v, s)) = State' (v, Scale x s)
 
 payout_ : Text -> Obs Decimal -> State' ()
-payout_ c a = State' ((), Scale a $ One c)
+payout_ c a = State' ((), Scale a $ Pay c 1.0 None)
 
 
 class Scalar a where
@@ -368,19 +370,32 @@ class Scalar a where
 
 instance Scalar Decimal where
   scale x (State' (v, s)) = State' (v, Scale (lit x) s)
-  payout c a = State' ((), Scale (lit a) $ One c)
+  payout asset amount = State' ((), Pay asset amount None) -- Scale (lit a) $ One c)
 
 instance Scalar Int where
   scale x (State' (v, s)) = State' (v, Scale (lit $ intToDecimal x) s)
-  payout c a = State' ((), Scale (lit $ intToDecimal a) $ One c)
+  payout asset amount = State' ((), Pay asset (intToDecimal amount) None) --Scale (lit $ intToDecimal a) $ One c)
 
 instance Scalar (Obs Decimal) where
   scale x (State' (v, s)) = State' (v, Scale x s)
-  payout c a = State' ((), Scale a $ One c) : State' ()
+  payout asset amount = State' ((), Scale amount $ Pay asset 1.0 None) : State' ()
 
 
 applyFixing : Text -> Optional Date -> Decimal -> State -> State
-applyFixing name fixingdate value state = state
+applyFixing name fixingdate value = \case
+  Void -> Void
+  Rollout { .. } -> Rollout { state = applyFixing name fixingdate value state; ..}
+  Continue -> Continue
+  And xs -> And $ applyFixing name fixingdate value <$> xs
+  Pay { .. } -> Pay { .. }
+  Give c -> Give $ applyFixing name fixingdate value c
+  Scale o s -> Scale (applyFixingToObs name fixingdate value o) $ applyFixing name fixingdate value s
+  Branch ts -> Branch $ go <$> ts
+    where
+      go tr = tr
+        with 
+          prerequisite = applyFixingToObs name fixingdate value tr.prerequisite
+          state = applyFixing name fixingdate value tr.state
 
 select : (Actor, Text) -> Bool -> State -> State
 select (actor, name) rev = \case
@@ -388,7 +403,7 @@ select (actor, name) rev = \case
   Rollout { .. } -> Rollout { state = select (actor, name) rev state;.. }
   Continue -> Continue
   And xs -> And $ select (actor, name) rev <$> xs
-  One c -> One c
+  Pay { .. } -> Pay { .. }
   Give c -> Give $ select (actor, name) (not rev) c
   Scale o s -> Scale o $ select (actor, name) rev s
   Branch ts -> Branch $ go <$> ts
@@ -400,18 +415,19 @@ select (actor, name) rev = \case
                     else tr
                 _ -> tr
 
---  if optional False (\x -> snd x == t.transitionType._2 && member (fst x) t.transitionType._1) selection
-
 data ReduceContext = ReduceContext
   with
     fixingDate : Date
     paymentDate : Time
     rolloutCont : State
 
-applyContextToPayment : Optional ReduceContext -> Text -> State
-applyContextToPayment (Some ctx) asset
-  = Branch [ Transition with state = One asset; prerequisite = (after $ lit ctx.paymentDate); transitionType = TransitionWhen ]
-applyContextToPayment None asset = One asset
+applyContextToPayment : Optional ReduceContext -> Text -> Decimal -> Optional Time -> State
+applyContextToPayment (Some ctx) asset amount (Some maturity)
+  = Pay asset amount (Some maturity)
+applyContextToPayment (Some ctx) asset amount None
+  = Pay asset amount (Some ctx.paymentDate)
+
+applyContextToPayment None asset amount maturity = Pay asset amount maturity
 
 
 reduceState' : Time -> Decimal -> Bool -> Optional ReduceContext -> State -> [State]
@@ -441,7 +457,10 @@ reduceState' now sc rev ctx = if sc == 0.0 then const [Void] else \case
       Some ReduceContext with .. -> reduceState' now sc rev ctx rolloutCont
       None -> error "Continue used outside recursive Rollout"
     And xs -> concatMap (reduceState' now sc rev ctx) xs
-    One c -> [if rev then Give p else p] where p = Scale (lit sc) $ applyContextToPayment ctx c
+    Pay asset amount maturity ->
+        [if rev then Give p else p]
+      where 
+        p = applyContextToPayment ctx asset (sc * amount) maturity
     Give c -> reduceState' now sc (not rev) ctx c 
     Scale o s -> case reduce now o of
       Obs (Constant v) -> reduceState' now (sc * v) rev ctx s
@@ -463,95 +482,10 @@ reduceState' now sc rev ctx = if sc == 0.0 then const [Void] else \case
                       TransitionChoice tc ->
                         Right $ Some t
 
-
-                  {-
-                    let prerequisite = reduce now fixingdate fixings t.prerequisite
-                        state = reduceState' now fixingdate fixings sc rev t.state
-                    in  case fromObs prerequisite of
-                          Some False -> Right None
-                          None -> case state of
-                                  [] -> Right None
-                                  [Void] -> Right None
-                                  [s] -> Right $ Some t with state = s; prerequisite
-                                  xs -> Right $ Some t with prerequisite; state = And xs
-                          Some True ->                             
-                            let
-                              go x = case t.transitionType of
-                                TransitionChoice tc -> snd x == tc._2 && member (fst x) tc._1
-                                TransitionWhen -> True
-                            in
-                              if optional False go selection
-                                then Left state
-                                else case state of
-                                  [] -> Right None
-                                  [Void] -> Right None
-                                  [s] -> Right $ Some t with state = s; prerequisite
-                                  xs -> Right $ Some t with prerequisite; state = And xs
--}
-{-
-reduceState : Time -> Optional Date -> M.Map (Text, Date) Decimal -> Optional (Actor, Text) -> Decimal -> Bool -> Optional ReduceContext -> State -> [State]
-reduceState now fixingdate fixings selection sc rev ctx = if sc == 0.0 then const [Void] else \case
-    Void -> []
-
-    -- vvv todo stop if choice was exercised ??
-    Rollout with startDate=Obs sd; .. ->
-        case reduce_ now fixingdate fixings sd of
-          Constant sd -> [] -- todo
-          _ -> [Rollout with startDate=Obs sd; .. ] -- startDate = sd; endDate = sd; ..]
-
-        --sd = reduce now fixingdate fixings startDate
-        --ed = reduce now fixingdate fixings endDate
-    Next -> error "Next not implemented"
---    LambdaO _ -> error "Lambda0 not implemented"
---    LambdaS _ -> error "LambdaS not implemented"
-    App _ _ -> error "App not implemented"
-    And xs -> concatMap (reduceState now fixingdate fixings selection sc rev ctx) xs
-    One c -> [if rev then Give p else p] where p = Scale (lit sc) $ One c
-    Give c -> reduceState now fixingdate fixings selection sc (not rev) ctx c 
-    Scale o s -> case reduce now fixingdate fixings o of
-      Obs (Constant v) -> reduceState now fixingdate fixings selection (sc * v) rev ctx s
-      o' -> map (Scale o') (reduceState now fixingdate fixings selection sc rev ctx s)
-    Branch ts -> case res of
-                  (x::_, _) -> x
-                  ([], []) -> []
-                  ([], ts) -> [Branch ts]
-                where
-                  res = fmap catOptionals $ partitionEithers $ map proc ts
-                  proc : Transition -> Either [State] (Optional (Transition))
-                  proc t =
-                    let prerequisite = reduce now fixingdate fixings t.prerequisite
-                        state = reduceState now fixingdate fixings None sc rev ctx t.state
-                    in  case fromObs prerequisite of
-                          Some False -> Right None
-                          None -> case state of
-                                  [] -> Right None
-                                  [Void] -> Right None
-                                  [s] -> Right $ Some t with state = s; prerequisite
-                                  xs -> Right $ Some t with prerequisite; state = And xs
-                          Some True -> 
-                            let
-                              go x = case t.transitionType of
-                                TransitionChoice tc -> snd x == tc._2 && member (fst x) tc._1
-                                TransitionWhen -> True
-                            in
-                              if optional False go selection
-                                then Left state
-                                else case state of
-                                  [] -> Right None
-                                  [Void] -> Right None
-                                  [s] -> Right $ Some t with state = s; prerequisite
-                                  xs -> Right $ Some t with prerequisite; state = And xs
--}
-
 type Cid = Either KontractId TransferId
 createFromState : Kontract -> State -> Update Cid
-createFromState this (One currency) = 
-  Right <$> createPayEffect this.service this.writer this.holder currency 1.0
-createFromState this (Give (One currency)) =
-  Right <$> createPayEffect this.service this.holder this.writer currency 1.0
-createFromState this (Scale (Obs (Constant amount)) (One currency)) = Right <$> createPayEffect this.service this.writer this.holder currency amount
-createFromState this (Give (Scale (Obs (Constant amount)) (One currency))) = Right <$> createPayEffect this.service this.holder this.writer currency amount
--- todo createFromState _ (Pay currency amount fromParty toParty) = CIou <$> create Iou with currency; amount; obligor = fromParty; owner = toParty
+createFromState this (Pay asset amount maturity) = Right <$> createPayEffect this.service this.writer this.holder asset amount maturity
+createFromState this (Give (Pay asset amount maturity)) = Right <$> createPayEffect this.service this.holder this.writer asset amount maturity
 createFromState this state = Left <$> create this with state
 
 template Kontract
@@ -594,21 +528,14 @@ template Kontract
 
     choice Publish : [Cid]
       with name : Text
-           fixingDate : Date
+           fixingDate : Optional Date
            value : Decimal
       controller oracle
       do
         now <- getTime
-        mapA (createFromState this) $ reduceState' now 1.0 False None state
+        let state' = applyFixing name fixingDate value state
+        mapA (createFromState this) $ reduceState' now 1.0 False None state'
 
--- todo
-{-kontract' : Time -> State -> State
-kontract' maturity s =
-  Branch [ Transition with transitionType = TransitionChoice (OneActor Holder, "")
-                           prerequisite = anytime                           
-                           state = s
-         ]
--}
 cutLondon : Date -> Time
 cutLondon d = time d 16 0 0  -- should be dealing with daylight saving
 
@@ -672,7 +599,6 @@ writer_can prerequisite name (State' (v, state))
   = Kontract' (v, [Transition with transitionType = TransitionChoice (OneActor Writer, name); ..])
 
 give (State' (v, s)) = State' (v, Give s) 
-one c = One c
 void = State' ((), Void) 
 
 rollout : Obs Date -> Period -> Int -> Offset -> Offset -> State' a -> State' ()

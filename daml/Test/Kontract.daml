@@ -30,7 +30,7 @@ test_1 = script do
           nominal = lit 10000000.0
           fixedrate = lit 0.012 
         in 
-          rollout
+          rolloutRecurse
             (lit $ date 2019 Sep 1)    
             (Months 3)
             12
@@ -43,7 +43,7 @@ test_1 = script do
               give $ payout "DKK" fixedLeg
               kontract do
                 holder_can (before end) "cancel" void
-                when (after end) next
+                when (after end) continue
 {-
   let euroCall maturity forccy domccy strike nominal = options do
         given true "exercise" do
@@ -87,8 +87,6 @@ swapExample = script do
               let fixedLeg = nominal * fixedrate * dcf "act/act"
               payout "USD" floatLeg
               give $ payout "USD" fixedLeg
-              kontract do
-                when anytime next
   
   let proposal = createAgreement alice bob (Some acme) (Service issuer "cash") swapContract
     
@@ -118,9 +116,29 @@ main = script do
   Right cid <- submit alice $ exerciseCmd prop $ MultiSign_Sign alice
 
   [Left cid] <-
-    submit acme $ exerciseCmd cid Publish with name = "LIBOR3M"; fixingDate = date 2019 Jan 1; value = 2.5
+    submit acme $ exerciseCmd cid Publish with name = "LIBOR3M"; fixingDate = None; value = 2.5
 
-  {- [Right cid1, Right cid2] <- -} 
   _exercise' alice cid (Select "call")
+
+  return ()
+
+
+simple = script do
+  alice <- allocateParty "alice"
+  bob <- allocateParty "bob"
+  acme <- allocateParty "acme"
+  issuer <- allocateParty "bank"
+  
+  let proposal = 
+        createAgreement alice bob (Some acme) (Service issuer "cash") do
+            payout "USD" 1000 
+            payout "CHF" 500
+            payout "USD" 100
+            give $ payout "CHF" 750
+
+  prop <- submit bob $ createCmd MultiSign with signed = [bob]; toSign = [alice]; contract = proposal
+  Right cid <- submit alice $ exerciseCmd prop $ MultiSign_Sign alice
+
+  _exercise' alice cid Lifecycle
 
   return ()

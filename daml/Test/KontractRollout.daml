@@ -10,7 +10,7 @@ import Util
 
 test = script do
 
-  setTime $ datetime 2019 Sep 1 12 0 0
+  setTime $ datetime 2019 Dec 1 12 0 0
 
   [alice, bob, acme, issuer] <- mapA allocateParty ["alice", "bob", "acme", "issuer"]
 
